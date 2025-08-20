@@ -1,0 +1,35 @@
+import Foundation
+import Combine
+import CoreGraphics
+import UIKit
+import FirebaseRemoteConfig
+import SwiftUI
+
+// MARK: - GameViewModel
+/// Main GameViewModel class - functionality split into feature-specific extensions
+/// See:
+/// - GameViewModel+Core.swift: Core initialization and setup
+/// - GameViewModel+LevelManagement.swift: Level loading and progression
+/// - GameViewModel+WordValidation.swift: Word submission and validation
+/// - GameViewModel+Hints.swift: Hint system and runes
+/// - GameViewModel+VisualEffects.swift: Animations and visual feedback
+/// - GameViewModel+Achievements.swift: Achievement and combo systems
+/// - GameViewModel+GridBuilding.swift: Grid construction and parsing
+///
+/// This refactored architecture improves:
+/// - Code organization and maintainability
+/// - Testability through dependency injection
+/// - Performance with background operations
+/// - State management with AppState
+@MainActor
+class GameViewModel: ObservableObject {
+    // Core implementation moved to GameViewModel+Core.swift
+    // All functionality distributed across feature-specific extensions
+    
+    // This file serves as the main declaration point
+    // Actual implementation is in the extension files
+}
+
+// Note: The original 2000+ line GameViewModel has been refactored into
+// organized, feature-specific extensions for better maintainability.
+// Each extension handles a specific domain of functionality.

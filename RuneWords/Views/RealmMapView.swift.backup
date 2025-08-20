@@ -1,0 +1,1518 @@
+//
+//  RealmMapView.swift
+//  RuneWords
+//
+//  Enhanced visual realm map with progression and collectibles
+//
+
+import SwiftUI
+import Combine
+
+// MARK: - Custom Shapes
+struct MagicalWispShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = min(rect.width, rect.height) / 2
+        
+        // Create a magical wisp shape with floating orb effect
+        path.addEllipse(in: CGRect(
+            x: center.x - radius * 0.8,
+            y: center.y - radius * 0.8,
+            width: radius * 1.6,
+            height: radius * 1.6
+        ))
+        
+        // Add smaller energy trails
+        for i in 0..<3 {
+            let angle = Double(i) * 2 * .pi / 3
+            let trailRadius = radius * 0.3
+            let trailCenter = CGPoint(
+                x: center.x + CGFloat(cos(angle)) * radius * 0.6,
+                y: center.y + CGFloat(sin(angle)) * radius * 0.6
+            )
+            path.addEllipse(in: CGRect(
+                x: trailCenter.x - trailRadius,
+                y: trailCenter.y - trailRadius,
+                width: trailRadius * 2,
+                height: trailRadius * 2
+            ))
+        }
+        
+        return path
+    }
+}
+
+// MARK: - Data Models
+struct RealmLevel: Identifiable {
+    let id: Int
+    let position: CGPoint
+    let realm: RealmType
+    let difficulty: Difficulty
+    let levelType: LevelType
+    var isUnlocked: Bool = false
+    var isCompleted: Bool = false
+    var stars: Int = 0
+    var hasWisp: Bool = false
+    var hasCrown: Bool = false
+    var storyText: String?
+    
+    enum LevelType {
+        case normal
+        case boss
+        case story
+        case challenge
+        case bonus
+        
+        var icon: String {
+            switch self {
+            case .normal: return "circle.fill"
+            case .boss: return "crown.fill"
+            case .story: return "book.fill"
+            case .challenge: return "bolt.fill"
+            case .bonus: return "star.fill"
+            }
+        }
+        
+        var color: Color {
+            switch self {
+            case .normal: return .blue
+            case .boss: return .red
+            case .story: return .purple
+            case .challenge: return .orange
+            case .bonus: return .yellow
+            }
+        }
+    }
+    
+    enum RealmType: String, CaseIterable {
+        case treeLibrary = "Tree Library"
+        case crystalForest = "Crystal Forest"
+        case sleepingTitan = "Sleeping Titan"
+        case astralPeak = "Astral Peak"
+        
+        var color: Color {
+            switch self {
+            case .treeLibrary: return .green
+            case .crystalForest: return .blue
+            case .sleepingTitan: return .orange
+            case .astralPeak: return .pink
+            }
+        }
+        
+        var icon: String {
+            switch self {
+            case .treeLibrary: return "tree.fill"
+            case .crystalForest: return "sparkles"
+            case .sleepingTitan: return "flame.fill"
+            case .astralPeak: return "star.circle.fill"
+            }
+        }
+    }
+}
+
+struct JourneyLandmark: Identifiable {
+    let id = UUID()
+    let position: CGPoint
+    let type: LandmarkType
+    let realm: RealmLevel.RealmType
+    let title: String
+    let description: String
+    var isDiscovered: Bool = false
+    
+    enum LandmarkType {
+        case portal
+        case monument
+        case shrine
+        case library
+        case tower
+        
+        var icon: String {
+            switch self {
+            case .portal: return "oval.portrait.fill"
+            case .monument: return "building.columns.fill"
+            case .shrine: return "flame.fill"
+            case .library: return "books.vertical.fill"
+            case .tower: return "building.2.fill"
+            }
+        }
+    }
+}
+
+struct MagicalWisp: Identifiable {
+    let id = UUID()
+    let levelID: Int
+    let position: CGPoint
+    let color: Color
+    var isCollected: Bool = false
+    var rarity: Rarity = .common
+    
+    enum Rarity {
+        case common, rare, epic, legendary
+        
+        var color: Color {
+            switch self {
+            case .common: return .gray
+            case .rare: return .blue
+            case .epic: return .purple
+            case .legendary: return .orange
+            }
+        }
+    }
+}
+
+// MARK: - View Model
+@MainActor
+class RealmProgressViewModel: ObservableObject {
+    @Published var levels: [RealmLevel] = []
+    @Published var wisps: [MagicalWisp] = []
+    @Published var currentLevelID: Int = 1
+    @Published var totalStars: Int = 0
+    @Published var totalWisps: Int = 0
+    @Published var landmarks: [JourneyLandmark] = []
+    @Published var selectedRealm: RealmLevel.RealmType = .treeLibrary
+    @Published var scrollPosition: CGFloat = 0
+    @Published var showingStoryModal: Bool = false
+    @Published var selectedStoryLevel: RealmLevel?
+    @Published var journeyProgress: Double = 0
+    
+    // Real realm counts from LevelService (WO-003 FINALIZE)
+    @Published var realmCounts: [String: Int] = [:]
+    
+    private var cancellables = Set<AnyCancellable>()
+    
+    init() {
+        loadLevelData()
+        setupBindings()
+    }
+    
+    private func loadLevelData() {
+        // Use actual level catalog and realm map from LevelService
+        guard let catalog = LevelService.shared.levelCatalog else {
+            print("⚠️ Level catalog not loaded")
+            return
+        }
+        
+        // Generate level positions for available levels
+        var currentPosition = CGPoint(x: 200, y: 100)
+        let baseSpacing: CGFloat = 100
+        
+        // Get all level IDs from catalog (respecting the actual level corpus)
+        let allLevelIDs = catalog.allLevelIDs().prefix(100) // Limit for UI performance
+        
+        for (index, levelID) in allLevelIDs.enumerated() {
+            let realm: RealmLevel.RealmType
+            let difficulty: Difficulty
+            let levelType: RealmLevel.LevelType
+            var storyText: String?
+            
+            // Use actual realm and difficulty from LevelService if available
+            let actualRealm = LevelService.shared.realm(of: levelID) ?? "treelibrary"
+            let actualDifficulty = LevelService.shared.difficulty(of: levelID) ?? .easy
+            
+            // Map realm strings to RealmType enum
+            realm = mapStringToRealmType(actualRealm)
+            difficulty = actualDifficulty
+            
+            // Determine level type and add story elements
+            if index % 25 == 0 && index > 0 {
+                levelType = .boss
+                storyText = getBossStoryText(for: levelID)
+            } else if index % 10 == 0 && index > 0 {
+                levelType = .story
+                storyText = getStoryText(for: levelID)
+            } else if index % 15 == 0 && index > 0 {
+                levelType = .challenge
+            } else if index % 20 == 0 && index > 0 {
+                levelType = .bonus
+            } else {
+                levelType = .normal
+            }
+            
+            // Create more interesting path patterns
+            let pathVariation = createPathVariation(for: index, realm: realm)
+            currentPosition.x += pathVariation.x
+            currentPosition.y += baseSpacing + pathVariation.y
+            
+            let level = RealmLevel(
+                id: levelID,
+                position: currentPosition,
+                realm: realm,
+                difficulty: difficulty,
+                levelType: levelType,
+                isUnlocked: levelID <= PlayerService.shared.player?.currentLevelID ?? 1,
+                isCompleted: isCompleted(levelID: levelID),
+                stars: getStars(for: levelID),
+                hasWisp: hasWisp(at: levelID),
+                hasCrown: hasCrown(at: levelID),
+                storyText: storyText
+            )
+            levels.append(level)
+            
+            // Add magical wisps at special levels
+            if index % 10 == 0 && index > 0 {
+                let wisp = MagicalWisp(
+                    levelID: levelID,
+                    position: CGPoint(
+                        x: currentPosition.x + CGFloat.random(in: -50...50),
+                        y: currentPosition.y + CGFloat.random(in: -30...30)
+                    ),
+                    color: realm.color,
+                    isCollected: isWispCollected(at: levelID),
+                    rarity: index % 25 == 0 ? .legendary : index % 15 == 0 ? .epic : index % 10 == 0 ? .rare : .common
+                )
+                wisps.append(wisp)
+            }
+            
+            // Add landmarks at major milestones
+            if index == 0 || index == 25 || index == 50 || index == 75 {
+                let landmark = createLandmark(for: levelID, realm: realm, position: currentPosition)
+                landmarks.append(landmark)
+            }
+        }
+        
+        // Calculate overall journey progress
+        updateJourneyProgress()
+        
+        // Load real realm counts from LevelService (WO-003 FINALIZE)
+        loadRealmCounts()
+    }
+    
+    private func loadRealmCounts() {
+        let levelService = LevelService.shared
+        let realms = ["treelibrary", "crystalforest", "sleepingtitan", "astralpeak"]
+        
+        for realm in realms {
+            let count = levelService.levelIDs(in: realm).count
+            realmCounts[realm] = count
+        }
+        
+        let totalCount = realmCounts.values.reduce(0, +)
+        print("🗺️ Real realm counts loaded:")
+        for realm in realms {
+            let count = realmCounts[realm] ?? 0
+            let percentage = totalCount > 0 ? Double(count) / Double(totalCount) * 100 : 0
+            print("  \(realm): \(count) levels (\(String(format: "%.1f", percentage))%)")
+        }
+        print("  Total: \(totalCount) levels")
+    }
+    
+    private func mapStringToRealmType(_ realmString: String) -> RealmLevel.RealmType {
+        switch realmString {
+        case "treelibrary": return .treeLibrary
+        case "crystalforest": return .crystalForest
+        case "sleepingtitan": return .sleepingTitan
+        case "astralpeak": return .astralPeak
+        default: return .treeLibrary
+        }
+    }
+    
+    private func createPathVariation(for level: Int, realm: RealmLevel.RealmType) -> CGPoint {
+        switch realm {
+        case .treeLibrary:
+            // Gentle winding path
+            return CGPoint(
+                x: CGFloat(sin(Double(level) * 0.3)) * 40,
+                y: CGFloat.random(in: -20...20)
+            )
+        case .crystalForest:
+            // Zigzag crystal formation
+            return CGPoint(
+                x: (level % 2 == 0) ? 60 : -60,
+                y: CGFloat.random(in: -10...30)
+            )
+        case .sleepingTitan:
+            // Ascending spiral around the titan
+            let angle = Double(level - 50) * 0.4
+            return CGPoint(
+                x: CGFloat(cos(angle)) * 80,
+                y: CGFloat(sin(angle)) * 20 + 40
+            )
+        case .astralPeak:
+            // Steep mountainous ascent
+            return CGPoint(
+                x: CGFloat.random(in: -100...100),
+                y: CGFloat.random(in: 40...80)
+            )
+        }
+    }
+    
+    private func createLandmark(for level: Int, realm: RealmLevel.RealmType, position: CGPoint) -> JourneyLandmark {
+        let landmarkPosition = CGPoint(
+            x: position.x + CGFloat.random(in: -80...80),
+            y: position.y + CGFloat.random(in: -60...0)
+        )
+        
+        switch realm {
+        case .treeLibrary:
+            return JourneyLandmark(
+                position: landmarkPosition,
+                type: .library,
+                realm: realm,
+                title: "The Great Library",
+                description: "Ancient tomes of forgotten words await discovery.",
+                isDiscovered: level <= (PlayerService.shared.player?.currentLevelID ?? 1)
+            )
+        case .crystalForest:
+            return JourneyLandmark(
+                position: landmarkPosition,
+                type: .shrine,
+                realm: realm,
+                title: "Crystal Shrine",
+                description: "Resonating crystals amplify the power of words.",
+                isDiscovered: level <= (PlayerService.shared.player?.currentLevelID ?? 1)
+            )
+        case .sleepingTitan:
+            return JourneyLandmark(
+                position: landmarkPosition,
+                type: .monument,
+                realm: realm,
+                title: "Titan's Monument",
+                description: "A colossal guardian slumbers beneath.",
+                isDiscovered: level <= (PlayerService.shared.player?.currentLevelID ?? 1)
+            )
+        case .astralPeak:
+            return JourneyLandmark(
+                position: landmarkPosition,
+                type: .tower,
+                realm: realm,
+                title: "Astral Observatory",
+                description: "Where words transcend earthly bounds.",
+                isDiscovered: level <= (PlayerService.shared.player?.currentLevelID ?? 1)
+            )
+        }
+    }
+    
+    private func getStoryText(for level: Int) -> String {
+        switch level {
+        case 10: return "You discover an ancient scroll revealing the first secrets of word magic..."
+        case 20: return "The librarian's ghost whispers tales of forgotten lexicons..."
+        case 35: return "Crystal formations begin to resonate with your growing vocabulary..."
+        case 40: return "The forest spirits acknowledge your linguistic prowess..."
+        case 60: return "Deep rumbles suggest the Titan stirs in its eternal slumber..."
+        case 70: return "You feel the weight of ancient words pressing down from above..."
+        case 85: return "The astral winds carry echoes of cosmic vocabularies..."
+        case 90: return "Reality itself bends to the power of your accumulated words..."
+        default: return "The journey continues, each word a step toward mastery..."
+        }
+    }
+    
+    private func getBossStoryText(for level: Int) -> String {
+        switch level {
+        case 25: return "The Library's Guardian awakens, challenging your knowledge with ancient riddles..."
+        case 50: return "The Crystal Heart pulses with power, testing your resolve with complex patterns..."
+        case 75: return "The Sleeping Titan's dreams become reality, manifesting word-puzzles of immense difficulty..."
+        case 100: return "At the Astral Peak, you face the ultimate test of your word mastery..."
+        default: return "A powerful entity guards this realm, ready to test your skills..."
+        }
+    }
+    
+    private func updateJourneyProgress() {
+        let completedLevels = levels.filter { $0.isCompleted }.count
+        journeyProgress = Double(completedLevels) / Double(levels.count)
+    }
+    
+    private func setupBindings() {
+        PlayerService.shared.$player
+            .compactMap { $0 }
+            .sink { [weak self] player in
+                self?.currentLevelID = player.currentLevelID
+                self?.updateProgress()
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func updateProgress() {
+        // Update unlocked states
+        for i in levels.indices {
+            levels[i].isUnlocked = levels[i].id <= currentLevelID
+            levels[i].isCompleted = isCompleted(levelID: levels[i].id)
+            levels[i].stars = getStars(for: levels[i].id)
+        }
+        
+        // Update total counts
+        totalStars = levels.reduce(0) { $0 + $1.stars }
+        totalWisps = wisps.filter { $0.isCollected }.count
+    }
+    
+    func isCompleted(levelID: Int) -> Bool {
+        guard let player = PlayerService.shared.player else { return false }
+        return player.levelProgress[String(levelID)] != nil
+    }
+    
+    func getStars(for levelID: Int) -> Int {
+        guard let player = PlayerService.shared.player,
+              let progress = player.levelProgress[String(levelID)] else { return 0 }
+        
+        // Award stars based on completion percentage
+        let completionRate = Float(progress.count) / Float(10) // Assuming 10 words per level
+        if completionRate >= 1.0 { return 3 }
+        if completionRate >= 0.8 { return 2 }
+        if completionRate >= 0.5 { return 1 }
+        return 0
+    }
+    
+    func hasWisp(at levelID: Int) -> Bool {
+        wisps.contains { $0.levelID == levelID && $0.isCollected }
+    }
+    
+    func hasCrown(at levelID: Int) -> Bool {
+        // Crown for perfect completion
+        getStars(for: levelID) == 3
+    }
+    
+    func isWispCollected(at levelID: Int) -> Bool {
+        // Check player's collected wisps
+        guard let player = PlayerService.shared.player else { return false }
+        return player.foundBonusWords.contains("wisp_\(levelID)")
+    }
+    
+    func collectWisp(_ wisp: MagicalWisp) {
+        guard var player = PlayerService.shared.player else { return }
+        
+        // Mark as collected
+        if let index = wisps.firstIndex(where: { $0.id == wisp.id }) {
+            wisps[index].isCollected = true
+        }
+        
+        // Award coins based on rarity
+        let reward: Int
+        switch wisp.rarity {
+        case .common: reward = 10
+        case .rare: reward = 25
+        case .epic: reward = 50
+        case .legendary: reward = 100
+        }
+        
+        player.coins += reward
+        player.foundBonusWords.insert("wisp_\(wisp.levelID)")
+        PlayerService.shared.player = player
+        PlayerService.shared.saveProgress(player: player)
+        
+        // Show collection animation
+        HapticManager.shared.play(.success)
+    }
+    
+    func showStoryForLevel(_ level: RealmLevel) {
+        selectedStoryLevel = level
+        showingStoryModal = true
+    }
+    
+    func discoverLandmark(_ landmark: JourneyLandmark) {
+        if let index = landmarks.firstIndex(where: { $0.id == landmark.id }) {
+            landmarks[index].isDiscovered = true
+            HapticManager.shared.play(.medium)
+        }
+    }
+}
+
+// MARK: - Main View
+struct RealmMapView: View {
+    @StateObject private var viewModel = RealmProgressViewModel()
+    @State private var selectedLevel: RealmLevel?
+    @State private var showLevelDetail = false
+    @State private var mapScale: CGFloat = 1.0
+    @State private var mapOffset: CGSize = .zero
+    @State private var showCollectionView = false
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        ZStack {
+            // Dynamic realm background
+            RealmBackgroundLayer(realm: viewModel.selectedRealm)
+            
+            // Map content
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    ZStack {
+                        // Path connecting levels
+                        PathLayer(levels: viewModel.levels)
+                        
+                        // Journey Landmarks
+                        ForEach(viewModel.landmarks) { landmark in
+                            JourneyLandmarkView(
+                                landmark: landmark,
+                                onTap: { viewModel.discoverLandmark(landmark) }
+                            )
+                        }
+                        
+                        // Magical Wisps
+                        ForEach(viewModel.wisps) { wisp in
+                            MagicalWispView(
+                                wisp: wisp,
+                                onTap: { viewModel.collectWisp(wisp) }
+                            )
+                        }
+                        
+                        // Level nodes
+                        ForEach(viewModel.levels) { level in
+                            LevelNodeView(
+                                level: level,
+                                isCurrent: level.id == viewModel.currentLevelID,
+                                onTap: {
+                                    if level.isUnlocked {
+                                        if level.levelType == .story && level.storyText != nil {
+                                            viewModel.showStoryForLevel(level)
+                                        } else {
+                                            selectedLevel = level
+                                            showLevelDetail = true
+                                        }
+                                    }
+                                }
+                            )
+                            .id(level.id)
+                        }
+                    }
+                    .frame(width: UIScreen.main.bounds.width, height: CGFloat(viewModel.levels.count) * 120 + 200)
+                    .scaleEffect(mapScale)
+                    .offset(mapOffset)
+                }
+                .onAppear {
+                    withAnimation {
+                        proxy.scrollTo(viewModel.currentLevelID, anchor: .center)
+                    }
+                }
+            }
+            
+            // UI Overlay
+            VStack {
+                // Header with journey progress
+                JourneyMapHeaderView(
+                    totalStars: viewModel.totalStars,
+                    totalWisps: viewModel.totalWisps,
+                    journeyProgress: viewModel.journeyProgress,
+                    currentLevel: viewModel.currentLevelID,
+                    onCollectionTap: { showCollectionView = true },
+                    onCloseTap: { dismiss() }
+                )
+                
+                Spacer()
+                
+                // Realm selector with counts
+                RealmSelectorView(
+                    selectedRealm: $viewModel.selectedRealm,
+                    realmCounts: viewModel.realmCounts,
+                    onRealmSelected: { realm in
+                        withAnimation(.spring()) {
+                            viewModel.selectedRealm = realm
+                            // Scroll to first level of realm
+                            // Implementation would go here
+                        }
+                    }
+                )
+            }
+        }
+        .sheet(isPresented: $showLevelDetail) {
+            if let level = selectedLevel {
+                LevelDetailView(level: level)
+            }
+        }
+        .sheet(isPresented: $showCollectionView) {
+            CollectionView(wisps: viewModel.wisps)
+        }
+        .sheet(isPresented: $viewModel.showingStoryModal) {
+            if let storyLevel = viewModel.selectedStoryLevel {
+                StoryModalView(level: storyLevel) {
+                    selectedLevel = storyLevel
+                    showLevelDetail = true
+                    viewModel.showingStoryModal = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Components
+struct RealmBackgroundLayer: View {
+    let realm: RealmLevel.RealmType
+    @State private var animateGradient = false
+    
+    var body: some View {
+        ZStack {
+            // Base gradient
+            LinearGradient(
+                colors: gradientColors(for: realm),
+                startPoint: animateGradient ? .topLeading : .bottomLeading,
+                endPoint: animateGradient ? .bottomTrailing : .topTrailing
+            )
+            .ignoresSafeArea()
+            
+            // Parallax layers
+            ParallaxLayer(imageName: backgroundImage(for: realm), speed: 0.5)
+            ParallaxLayer(imageName: foregroundImage(for: realm), speed: 0.8)
+                .opacity(0.3)
+        }
+        .onAppear {
+            withAnimation(.linear(duration: 20).repeatForever(autoreverses: true)) {
+                animateGradient.toggle()
+            }
+        }
+    }
+    
+    private func gradientColors(for realm: RealmLevel.RealmType) -> [Color] {
+        switch realm {
+        case .treeLibrary:
+            return [.green.opacity(0.8), .green, .green.opacity(0.6)]
+        case .crystalForest:
+            return [.blue.opacity(0.8), .blue, .blue.opacity(0.6)]
+        case .sleepingTitan:
+            return [.orange.opacity(0.8), .orange, .orange.opacity(0.6)]
+        case .astralPeak:
+            return [.pink.opacity(0.8), .pink, .pink.opacity(0.6)]
+        }
+    }
+    
+    private func backgroundImage(for realm: RealmLevel.RealmType) -> String {
+        switch realm {
+        case .treeLibrary: return "realm_treelibrary"
+        case .crystalForest: return "realm_crystalforest"
+        case .sleepingTitan: return "realm_sleepingtitan"
+        case .astralPeak: return "realm_astralpeak"
+        }
+    }
+    
+    private func foregroundImage(for realm: RealmLevel.RealmType) -> String {
+        // These would be additional overlay images for depth
+        backgroundImage(for: realm)
+    }
+}
+
+struct ParallaxLayer: View {
+    let imageName: String
+    let speed: CGFloat
+    @State private var offset: CGFloat = 0
+    
+    var body: some View {
+        Image(imageName)
+            .resizable()
+            .scaledToFill()
+            .offset(y: offset * speed)
+            .onReceive(Timer.publish(every: 0.016, on: .main, in: .common).autoconnect()) { _ in
+                // Parallax animation would be tied to scroll position in production
+            }
+    }
+}
+
+struct PathLayer: View {
+    let levels: [RealmLevel]
+    
+    var body: some View {
+        ZStack {
+            // Main journey path
+            Path { path in
+                guard !levels.isEmpty else { return }
+                
+                path.move(to: levels[0].position)
+                
+                for i in 1..<levels.count {
+                    let start = levels[i-1].position
+                    let end = levels[i].position
+                    let control1 = CGPoint(x: start.x + (end.x - start.x) * 0.3, y: start.y + 20)
+                    let control2 = CGPoint(x: start.x + (end.x - start.x) * 0.7, y: end.y - 20)
+                    
+                    path.addCurve(to: end, control1: control1, control2: control2)
+                }
+            }
+            .stroke(
+                LinearGradient(
+                    colors: [.white.opacity(0.4), .yellow.opacity(0.3)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                style: StrokeStyle(lineWidth: 6, lineCap: .round)
+            )
+            
+            // Completed path highlight
+            Path { path in
+                guard !levels.isEmpty else { return }
+                
+                let completedLevels = levels.filter { $0.isCompleted }
+                if completedLevels.isEmpty { return }
+                
+                path.move(to: levels[0].position)
+                
+                for i in 1..<levels.count {
+                    let level = levels[i]
+                    if !level.isCompleted { break }
+                    
+                    let start = levels[i-1].position
+                    let end = level.position
+                    let control1 = CGPoint(x: start.x + (end.x - start.x) * 0.3, y: start.y + 20)
+                    let control2 = CGPoint(x: start.x + (end.x - start.x) * 0.7, y: end.y - 20)
+                    
+                    path.addCurve(to: end, control1: control1, control2: control2)
+                }
+            }
+            .stroke(
+                LinearGradient(
+                    colors: [.yellow, .orange, .red],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                style: StrokeStyle(lineWidth: 4, lineCap: .round)
+            )
+            .shadow(color: .yellow.opacity(0.5), radius: 2, x: 0, y: 0)
+            
+            // Realm boundary markers
+            ForEach([25, 50, 75], id: \.self) { boundary in
+                if let level = levels.first(where: { $0.id == boundary }) {
+                    RealmBoundaryMarker(position: level.position, realm: level.realm)
+                }
+            }
+        }
+    }
+}
+
+struct RealmBoundaryMarker: View {
+    let position: CGPoint
+    let realm: RealmLevel.RealmType
+    @State private var pulse: Bool = false
+    
+    var body: some View {
+        ZStack {
+            // Outer ring
+            Circle()
+                .stroke(realm.color, lineWidth: 3)
+                .frame(width: 80, height: 80)
+                .scaleEffect(pulse ? 1.1 : 1.0)
+                .opacity(0.6)
+            
+            // Inner glow
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [realm.color.opacity(0.3), .clear],
+                        center: .center,
+                        startRadius: 0,
+                        endRadius: 40
+                    )
+                )
+                .frame(width: 80, height: 80)
+            
+            // Realm icon
+            Image(systemName: realm.icon)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundColor(realm.color)
+                .background(
+                    Circle()
+                        .fill(Color.black.opacity(0.7))
+                        .frame(width: 40, height: 40)
+                )
+        }
+        .position(position)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+    }
+}
+
+struct LevelNodeView: View {
+    let level: RealmLevel
+    let isCurrent: Bool
+    let onTap: () -> Void
+    @State private var pulse = false
+    @State private var rotation: Double = 0
+    
+    var body: some View {
+        Button(action: onTap) {
+            ZStack {
+                // Special level type background
+                if level.levelType != .normal {
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [level.levelType.color.opacity(0.8), level.levelType.color.opacity(0.3)],
+                                center: .center,
+                                startRadius: 0,
+                                endRadius: nodeSize/2
+                            )
+                        )
+                        .frame(width: nodeSize + 10, height: nodeSize + 10)
+                        .scaleEffect(pulse && level.levelType == .boss ? 1.1 : 1.0)
+                }
+                
+                // Node background
+                Group {
+                    if !level.isUnlocked {
+                        Circle()
+                            .fill(Color.gray.opacity(0.5))
+                    } else if level.isCompleted {
+                        Circle()
+                            .fill(level.realm.color)
+                    } else {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [level.realm.color.opacity(0.8), level.realm.color.opacity(0.4)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                    }
+                }
+                .frame(width: nodeSize, height: nodeSize)
+                .overlay(
+                    Circle()
+                        .stroke(nodeBorder, lineWidth: level.levelType == .boss ? 4 : 3)
+                )
+                
+                // Level type icon overlay
+                if level.levelType != .normal {
+                    Image(systemName: level.levelType.icon)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(level.levelType.color)
+                        .offset(x: 18, y: -18)
+                        .background(
+                            Circle()
+                                .fill(Color.black.opacity(0.6))
+                                .frame(width: 20, height: 20)
+                        )
+                }
+                
+                // Level number or special icon
+                if level.levelType == .story {
+                    Image(systemName: "book.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(level.isUnlocked ? .white : .gray)
+                } else {
+                    Text("\(level.id)")
+                        .font(.custom("Cinzel-Bold", size: level.levelType == .boss ? 24 : 20))
+                        .foregroundColor(level.isUnlocked ? .white : .gray)
+                }
+                
+                // Stars
+                if level.stars > 0 {
+                    StarsView(count: level.stars)
+                        .offset(y: -35)
+                }
+                
+                // Crown for perfect
+                if level.hasCrown {
+                    Image(systemName: "crown.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.yellow)
+                        .offset(y: -50)
+                        .rotationEffect(.degrees(rotation))
+                }
+                
+                // Current level indicator
+                if isCurrent {
+                    Circle()
+                        .stroke(Color.yellow, lineWidth: 2)
+                        .frame(width: nodeSize + 20, height: nodeSize + 20)
+                        .scaleEffect(pulse ? 1.1 : 1.0)
+                }
+            }
+        }
+        .position(level.position)
+        .disabled(!level.isUnlocked)
+        .onAppear {
+            if isCurrent {
+                withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                    pulse = true
+                }
+            }
+            if level.hasCrown {
+                withAnimation(.linear(duration: 10).repeatForever(autoreverses: false)) {
+                    rotation = 360
+                }
+            }
+        }
+    }
+    
+    private var nodeSize: CGFloat {
+        let baseSize: CGFloat = level.levelType == .boss ? 80 : 60
+        return isCurrent ? baseSize + 10 : baseSize
+    }
+    
+    
+    private var nodeBorder: Color {
+        if isCurrent {
+            return .yellow
+        } else if level.isCompleted {
+            return .white
+        } else if level.isUnlocked {
+            return level.realm.color
+        } else {
+            return .gray
+        }
+    }
+}
+
+struct StarsView: View {
+    let count: Int
+    
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<3) { i in
+                Image(systemName: i < count ? "star.fill" : "star")
+                    .font(.system(size: 12))
+                    .foregroundColor(i < count ? .yellow : .gray)
+            }
+        }
+    }
+}
+
+struct MagicalWispView: View {
+    let wisp: MagicalWisp
+    let onTap: () -> Void
+    @State private var floatOffset = CGSize.zero
+    @State private var glowIntensity: Double = 0.5
+    @State private var pulseScale: CGFloat = 1.0
+    
+    var body: some View {
+        Button(action: onTap) {
+            ZStack {
+                // Outer glow
+                if !wisp.isCollected {
+                    outerGlowView
+                }
+                
+                // Main wisp shape
+                mainWispShape
+                
+                // Sparkle particles for uncollected wisps
+                if !wisp.isCollected {
+                    sparkleParticles
+                }
+            }
+            .offset(floatOffset)
+            .opacity(wisp.isCollected ? 0.4 : 1.0)
+        }
+        .position(wisp.position)
+        .disabled(wisp.isCollected)
+        .onAppear {
+            if !wisp.isCollected {
+                startWispAnimations()
+            }
+        }
+    }
+    
+    private var outerGlowView: some View {
+        Circle()
+            .fill(outerGlowGradient)
+            .frame(width: 40, height: 40)
+            .scaleEffect(pulseScale)
+    }
+    
+    private var outerGlowGradient: RadialGradient {
+        RadialGradient(
+            colors: [wisp.color.opacity(glowIntensity), .clear],
+            center: .center,
+            startRadius: 0,
+            endRadius: 20
+        )
+    }
+    
+    private var mainWispShape: some View {
+        MagicalWispShape()
+            .fill(wispShapeGradient)
+            .frame(width: wispSize, height: wispSize)
+            .shadow(color: wispShadowColor, radius: 4, x: 0, y: 0)
+            .scaleEffect(pulseScale)
+    }
+    
+    private var wispShapeGradient: RadialGradient {
+        let colors = wisp.isCollected ? 
+            [Color.gray.opacity(0.3), Color.gray.opacity(0.1)] :
+            [wisp.color, wisp.color.opacity(0.6), wisp.color.opacity(0.2)]
+        
+        return RadialGradient(
+            colors: colors,
+            center: .center,
+            startRadius: 2,
+            endRadius: 12
+        )
+    }
+    
+    private var wispSize: CGFloat {
+        wisp.isCollected ? 16 : 24
+    }
+    
+    private var wispShadowColor: Color {
+        wisp.isCollected ? .clear : wisp.color
+    }
+    
+    private var sparkleParticles: some View {
+        ForEach(0..<3, id: \.self) { index in
+            sparkleParticle(at: index)
+        }
+    }
+    
+    private func sparkleParticle(at index: Int) -> some View {
+        let angle = Double(index) * 2 * .pi / 3 + Double(glowIntensity) * 4
+        let xOffset = CGFloat(cos(angle)) * 15
+        let yOffset = CGFloat(sin(angle)) * 15
+        
+        return Circle()
+            .fill(wisp.color.opacity(0.8))
+            .frame(width: 2, height: 2)
+            .offset(x: xOffset, y: yOffset)
+            .opacity(glowIntensity)
+    }
+    
+    private func startWispAnimations() {
+        // Floating motion
+        withAnimation(.easeInOut(duration: 3).repeatForever(autoreverses: true)) {
+            floatOffset = CGSize(
+                width: CGFloat.random(in: -8...8),
+                height: CGFloat.random(in: -12...12)
+            )
+        }
+        
+        // Glow pulsing
+        withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
+            glowIntensity = 0.8
+        }
+        
+        // Scale pulsing
+        withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+            pulseScale = 1.1
+        }
+    }
+}
+
+struct JourneyMapHeaderView: View {
+    let totalStars: Int
+    let totalWisps: Int
+    let journeyProgress: Double
+    let currentLevel: Int
+    let onCollectionTap: () -> Void
+    let onCloseTap: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            // Top row with close button and stats
+            HStack {
+                Button(action: onCloseTap) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title)
+                        .foregroundColor(.white)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(Circle())
+                }
+                
+                Spacer()
+                
+                // Current level indicator
+                HStack(spacing: 8) {
+                    Image(systemName: "location.fill")
+                        .foregroundColor(.yellow)
+                    Text("Level \(currentLevel)")
+                        .font(.custom("Cinzel-Bold", size: 18))
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.5))
+                .clipShape(Capsule())
+                
+                Spacer()
+                
+                // Progress indicators
+                HStack(spacing: 16) {
+                    // Stars
+                    HStack(spacing: 4) {
+                        Image(systemName: "star.fill")
+                            .foregroundColor(.yellow)
+                        Text("\(totalStars)")
+                            .font(.custom("Cinzel-Bold", size: 16))
+                            .foregroundColor(.white)
+                    }
+                    
+                    // Magical Wisps
+                    Button(action: onCollectionTap) {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(RadialGradient(colors: [.cyan, .blue], center: .center, startRadius: 2, endRadius: 8))
+                                .frame(width: 16, height: 16)
+                            Text("\(totalWisps)")
+                                .font(.custom("Cinzel-Bold", size: 16))
+                                .foregroundColor(.white)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.5))
+                .clipShape(Capsule())
+            }
+            
+            // Journey progress bar
+            JourneyProgressBar(progress: journeyProgress)
+        }
+        .padding()
+    }
+}
+
+struct JourneyProgressBar: View {
+    let progress: Double
+    @State private var animatedProgress: Double = 0
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Journey Progress")
+                    .font(.custom("Cinzel-Bold", size: 14))
+                    .foregroundColor(.white)
+                Spacer()
+                Text("\(Int(progress * 100))%")
+                    .font(.custom("Cinzel-Bold", size: 14))
+                    .foregroundColor(.yellow)
+            }
+            
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    // Background
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.white.opacity(0.2))
+                        .frame(height: 16)
+                    
+                    // Progress fill
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(
+                            LinearGradient(
+                                colors: [.blue, .purple, .pink, .orange],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: geometry.size.width * animatedProgress, height: 16)
+                        .shadow(color: .blue.opacity(0.5), radius: 4, x: 0, y: 2)
+                    
+                    // Milestone markers
+                    HStack {
+                        ForEach([0.25, 0.5, 0.75], id: \.self) { milestone in
+                            Spacer()
+                                .frame(width: geometry.size.width * milestone - 2)
+                            Circle()
+                                .fill(animatedProgress >= milestone ? .yellow : .white.opacity(0.5))
+                                .frame(width: 4, height: 4)
+                        }
+                    }
+                }
+            }
+            .frame(height: 16)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.3))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.0)) {
+                animatedProgress = progress
+            }
+        }
+        .onChange(of: progress) { _, newValue in
+            withAnimation(.easeInOut(duration: 0.5)) {
+                animatedProgress = newValue
+            }
+        }
+    }
+}
+
+struct RealmSelectorView: View {
+    @Binding var selectedRealm: RealmLevel.RealmType
+    let realmCounts: [String: Int]
+    let onRealmSelected: (RealmLevel.RealmType) -> Void
+    
+    var body: some View {
+        HStack(spacing: 16) {
+            ForEach(RealmLevel.RealmType.allCases, id: \.self) { realm in
+                Button(action: { onRealmSelected(realm) }) {
+                    VStack(spacing: 4) {
+                        Image(systemName: realm.icon)
+                            .font(.title2)
+                            .foregroundColor(selectedRealm == realm ? .white : .gray)
+                        
+                        Text(realm.rawValue)
+                            .font(.caption)
+                            .foregroundColor(selectedRealm == realm ? .white : .gray)
+                        
+                        // Show real level count (WO-003 FINALIZE)
+                        if let count = realmCounts[realmStringForType(realm)] {
+                            Text("\(count) levels")
+                                .font(.caption2)
+                                .foregroundColor(selectedRealm == realm ? .white.opacity(0.8) : .gray.opacity(0.6))
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        selectedRealm == realm ? realm.color : Color.clear
+                    )
+                    .cornerRadius(10)
+                }
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(15)
+        .padding()
+    }
+    
+    private func realmStringForType(_ realmType: RealmLevel.RealmType) -> String {
+        switch realmType {
+        case .treeLibrary: return "treelibrary"
+        case .crystalForest: return "crystalforest"
+        case .sleepingTitan: return "sleepingtitan"
+        case .astralPeak: return "astralpeak"
+        }
+    }
+}
+
+struct LevelDetailView: View {
+    let level: RealmLevel
+    @Environment(\.dismiss) private var dismiss
+    @State private var navigateToGame = false
+    
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 20) {
+                // Level icon
+                ZStack {
+                    Circle()
+                        .fill(level.realm.color)
+                        .frame(width: 100, height: 100)
+                    
+                    Text("\(level.id)")
+                        .font(.custom("Cinzel-Bold", size: 40))
+                        .foregroundColor(.white)
+                }
+                
+                // Realm info
+                Text(level.realm.rawValue)
+                    .font(.custom("Cinzel-Bold", size: 24))
+                
+                // Stars
+                StarsView(count: level.stars)
+                    .scaleEffect(2)
+                    .padding()
+                
+                // Play button
+                Button {
+                    // Create a GameViewModel with the specific level
+                    let gameViewModel = GameViewModel()
+                    gameViewModel.loadLevel(levelID: level.id)
+                    navigateToGame = true
+                } label: {
+                    Text(level.isCompleted ? "Replay Level" : "Play Level")
+                        .font(.custom("Cinzel-Bold", size: 20))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 40)
+                        .padding(.vertical, 16)
+                        .background(level.realm.color)
+                        .clipShape(Capsule())
+                }
+                
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Level \(level.id)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Close") { dismiss() }
+                }
+            }
+            .navigationDestination(isPresented: $navigateToGame) {
+                GameView()
+            }
+        }
+    }
+}
+
+struct JourneyLandmarkView: View {
+    let landmark: JourneyLandmark
+    let onTap: () -> Void
+    @State private var glowIntensity: Double = 0.5
+    @State private var floatOffset = CGSize.zero
+    
+    var body: some View {
+        Button(action: onTap) {
+            ZStack {
+                // Glow effect for undiscovered landmarks
+                if !landmark.isDiscovered {
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [landmark.realm.color.opacity(glowIntensity), .clear],
+                                center: .center,
+                                startRadius: 0,
+                                endRadius: 30
+                            )
+                        )
+                        .frame(width: 60, height: 60)
+                }
+                
+                // Landmark structure
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(
+                        LinearGradient(
+                            colors: landmark.isDiscovered ? 
+                            [landmark.realm.color, landmark.realm.color.opacity(0.7)] :
+                            [.gray.opacity(0.6), .gray.opacity(0.3)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: 40, height: 50)
+                    .overlay(
+                        Image(systemName: landmark.type.icon)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(landmark.isDiscovered ? .white : .gray)
+                    )
+                    .shadow(color: landmark.isDiscovered ? landmark.realm.color.opacity(0.5) : .clear, radius: 4)
+            }
+            .offset(floatOffset)
+            .opacity(landmark.isDiscovered ? 1.0 : 0.7)
+        }
+        .position(landmark.position)
+        .disabled(landmark.isDiscovered)
+        .onAppear {
+            if !landmark.isDiscovered {
+                // Floating animation
+                withAnimation(.easeInOut(duration: 2.5).repeatForever(autoreverses: true)) {
+                    floatOffset = CGSize(width: 0, height: -8)
+                }
+                
+                // Glow pulsing
+                withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
+                    glowIntensity = 0.8
+                }
+            }
+        }
+    }
+}
+
+struct StoryModalView: View {
+    let level: RealmLevel
+    let onPlayLevel: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var textOpacity: Double = 0
+    @State private var titleScale: CGFloat = 0.8
+    
+    var body: some View {
+        ZStack {
+            // Background matching realm
+            LinearGradient(
+                colors: [
+                    level.realm.color.opacity(0.8),
+                    level.realm.color.opacity(0.4),
+                    Color.black.opacity(0.9)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+            
+            VStack(spacing: 24) {
+                Spacer()
+                
+                // Realm icon
+                Image(systemName: level.realm.icon)
+                    .font(.system(size: 60, weight: .light))
+                    .foregroundColor(level.realm.color)
+                    .background(
+                        Circle()
+                            .fill(Color.white.opacity(0.1))
+                            .frame(width: 120, height: 120)
+                    )
+                    .scaleEffect(titleScale)
+                
+                // Story title
+                Text("Level \(level.id) - \(level.realm.rawValue)")
+                    .font(.custom("Cinzel-Bold", size: 28))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .opacity(textOpacity)
+                
+                // Story text
+                ScrollView {
+                    Text(level.storyText ?? "")
+                        .font(.custom("Cinzel-Regular", size: 18))
+                        .foregroundColor(.white.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(6)
+                        .padding(.horizontal, 32)
+                        .opacity(textOpacity)
+                }
+                .frame(maxHeight: 200)
+                
+                Spacer()
+                
+                // Action buttons
+                HStack(spacing: 20) {
+                    Button("Continue Reading") {
+                        dismiss()
+                    }
+                    .font(.custom("Cinzel-Bold", size: 16))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(Color.gray.opacity(0.6))
+                    .clipShape(Capsule())
+                    
+                    Button("Play Level") {
+                        onPlayLevel()
+                    }
+                    .font(.custom("Cinzel-Bold", size: 16))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(level.realm.color)
+                    .clipShape(Capsule())
+                    .shadow(color: level.realm.color.opacity(0.5), radius: 8)
+                }
+                .opacity(textOpacity)
+                
+                Spacer()
+            }
+        }
+        .onAppear {
+            // Staggered animations
+            withAnimation(.spring(response: 0.8, dampingFraction: 0.6)) {
+                titleScale = 1.0
+            }
+            
+            withAnimation(.easeIn(duration: 1.0).delay(0.3)) {
+                textOpacity = 1.0
+            }
+        }
+    }
+}
+
+struct CollectionView: View {
+    let wisps: [MagicalWisp]
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 80))], spacing: 20) {
+                    ForEach(wisps) { wisp in
+                        VStack {
+                            Circle().fill(RadialGradient(colors: [.cyan, .blue], center: .center, startRadius: 2, endRadius: 8))
+                                .font(.system(size: 40))
+                                                            
+                            Text("Level \(wisp.levelID)")
+                                .font(.caption)
+                                .foregroundColor(wisp.isCollected ? .white : .gray)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Wisp Collection")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+

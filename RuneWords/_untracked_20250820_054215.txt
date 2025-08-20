@@ -1,0 +1,17 @@
+AdManager_Fixed.swift.backup.disabled
+AdMobConfiguration_Fixed.swift.backup.disabled
+AppDelegate+Monetization.swift
+Info.plist.updated
+Models/LocalCatalogIndex.swift
+Services/AdMobConfiguration.swift
+Services/ProgressService.swift
+UI/Modifiers/FixedCircleShadow.swift
+UMPValidator.swift
+Views/Components/AccessibleLetterWheel.swift
+Views/Components/BottomActionsBar.swift
+Views/Components/WordsBoardView.swift
+Views/DevToolsView.swift
+_audit_20250820_053534.md
+_state_20250820_053817.md
+_untracked_20250820_054215.txt
+_working_diff_20250820_054215.patch

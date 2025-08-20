@@ -1,0 +1,89 @@
+//
+//  AdMobConfiguration.swift
+//  RuneWords
+//
+//  Updated for Google Mobile Ads SDK 11.x (2025)
+
+import GoogleMobileAds
+
+struct AdMobConfiguration {
+    
+    struct AdUnitIDs {
+        #if DEBUG
+        // Use test ad unit IDs for development
+        static let banner = "ca-app-pub-3940256099942544/2435281174"
+        static let interstitial = "ca-app-pub-3940256099942544/4411468910"
+        static let rewarded = "ca-app-pub-3940256099942544/1712485313"
+        #else
+        // Production ad unit IDs
+        static let banner = "ca-app-pub-8632219809769416/YOUR_BANNER_ID"
+        static let interstitial = "ca-app-pub-8632219809769416/YOUR_INTERSTITIAL_ID"
+        static let rewarded = "ca-app-pub-8632219809769416/YOUR_REWARDED_ID"
+        #endif
+    }
+    
+    // Test device identifiers
+    static var testDeviceIdentifiers: [String] {
+        #if DEBUG
+        return [
+            GADSimulator.identifier, // This is the correct way now
+            // Add your physical test device IDs here
+            // "abcdef01234567890123456789012345"
+        ]
+        #else
+        return [] // No test devices in production
+        #endif
+    }
+    
+    // MARK: - Initialization
+    static func initialize(completion: @escaping (Bool) -> Void) {
+        print("🚀 Initializing AdMob SDK with App ID: \(appID)")
+        
+        // Start the Mobile Ads SDK
+        GADMobileAds.sharedInstance().start { status in
+            print("✅ AdMob SDK initialized")
+            
+            // Log adapter status
+            for adapter in status.adapterStatusesByClassName {
+                print("Adapter: \(adapter.key) - State: \(adapter.value.state.rawValue)")
+            }
+            
+            completion(true)
+        }
+    }
+    
+    // App ID from Info.plist
+    private static let appID = "ca-app-pub-8632219809769416~2702174558"
+}
+
+// MARK: - Helper Extensions
+extension AdMobConfiguration {
+    
+    /// Create a properly configured ad request
+    static func createRequest() -> GADRequest {
+        let request = GADRequest()
+        
+        #if DEBUG
+        // Set test device identifiers in debug mode
+        GADMobileAds.sharedInstance().requestConfiguration.testDeviceIdentifiers = testDeviceIdentifiers
+        #endif
+        
+        return request
+    }
+    
+    /// Configure request settings
+    static func configureRequestSettings() {
+        let requestConfiguration = GADMobileAds.sharedInstance().requestConfiguration
+        
+        // Set test devices
+        #if DEBUG
+        requestConfiguration.testDeviceIdentifiers = testDeviceIdentifiers
+        #endif
+        
+        // Tag for child-directed treatment (if applicable)
+        // requestConfiguration.tagForChildDirectedTreatment = false
+        
+        // Tag for users under age of consent
+        // requestConfiguration.tagForUnderAgeOfConsent = false
+    }
+}

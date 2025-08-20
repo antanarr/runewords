@@ -1,0 +1,179 @@
+//
+//  AdManager.swift
+//  RuneWords
+//
+//  Updated for Google Mobile Ads SDK 11.x (2025)
+
+import GoogleMobileAds
+import UIKit
+
+class AdManager: NSObject {
+    
+    static let shared = AdManager()
+    
+    // Ad instances
+    private var bannerView: GADBannerView?
+    private var interstitialAd: GADInterstitialAd?
+    private var rewardedAd: GADRewardedAd?
+    
+    // Timing control
+    private var lastInterstitialTime: Date = .distantPast
+    private let interstitialCooldown: TimeInterval = 120 // 2 minutes
+    
+    // State tracking
+    private var isShowingAd = false
+    private var hasRemovedAds: Bool {
+        UserDefaults.standard.bool(forKey: "has_removed_ads")
+    }
+    
+    private override init() {
+        super.init()
+    }
+    
+    // MARK: - Initialization
+    func initialize() {
+        AdMobConfiguration.configureRequestSettings()
+        preloadAds()
+    }
+    
+    // MARK: - Preloading
+    func preloadAds() {
+        if !hasRemovedAds {
+            loadInterstitial()
+            loadRewarded()
+        }
+    }
+    
+    // MARK: - Banner Ads
+    func setupBanner(in viewController: UIViewController) -> UIView? {
+        guard !hasRemovedAds else { return nil }
+        
+        bannerView = GADBannerView(adSize: GADAdSizeBanner)
+        bannerView?.adUnitID = AdMobConfiguration.AdUnitIDs.banner
+        bannerView?.rootViewController = viewController
+        bannerView?.delegate = self
+        
+        let request = GADRequest() // Note: NOT GADRequest()
+        bannerView?.load(request)
+        
+        return bannerView
+    }
+    
+    // MARK: - Interstitial Ads
+    private func loadInterstitial() {
+        let request = GADRequest()
+        
+        GADInterstitialAd.load(
+            withAdUnitID: AdMobConfiguration.AdUnitIDs.interstitial,
+            request: request
+        ) { [weak self] ad, error in
+            if let error = error {
+                print("❌ Failed to load interstitial: \(error.localizedDescription)")
+                return
+            }
+            
+            self?.interstitialAd = ad
+            self?.interstitialAd?.fullScreenContentDelegate = self
+            print("✅ Interstitial loaded")
+        }
+    }
+    
+    func showInterstitial(from viewController: UIViewController) {
+        guard !hasRemovedAds,
+              !isShowingAd,
+              Date().timeIntervalSince(lastInterstitialTime) >= interstitialCooldown else {
+            return
+        }
+        
+        if let interstitialAd = interstitialAd {
+            isShowingAd = true
+            lastInterstitialTime = Date()
+            interstitialAd.present(fromRootViewController: viewController)
+        } else {
+            loadInterstitial() // Reload if not ready
+        }
+    }
+    
+    // MARK: - Rewarded Ads
+    private func loadRewarded() {
+        let request = GADRequest()
+        
+        GADRewardedAd.load(
+            withAdUnitID: AdMobConfiguration.AdUnitIDs.rewarded,
+            request: request
+        ) { [weak self] ad, error in
+            if let error = error {
+                print("❌ Failed to load rewarded ad: \(error.localizedDescription)")
+                return
+            }
+            
+            self?.rewardedAd = ad
+            self?.rewardedAd?.fullScreenContentDelegate = self
+            print("✅ Rewarded ad loaded")
+        }
+    }
+    
+    func showRewarded(from viewController: UIViewController, completion: @escaping (Bool) -> Void) {
+        guard !isShowingAd else {
+            completion(false)
+            return
+        }
+        
+        if let rewardedAd = rewardedAd {
+            isShowingAd = true
+            rewardedAd.present(fromRootViewController: viewController) { [weak self] in
+                let reward = rewardedAd.adReward
+                print("🎁 User earned reward: \(reward.amount) \(reward.type)")
+                completion(true)
+                self?.loadRewarded() // Preload next one
+            }
+        } else {
+            completion(false)
+            loadRewarded() // Try to load for next time
+        }
+    }
+    
+    // MARK: - Remove Ads
+    func removeAds() {
+        UserDefaults.standard.set(true, forKey: "has_removed_ads")
+        bannerView?.removeFromSuperview()
+        bannerView = nil
+        interstitialAd = nil
+        rewardedAd = nil
+    }
+}
+
+// MARK: - GADBannerViewDelegate
+extension AdManager: GADBannerViewDelegate {
+    func bannerViewDidReceiveAd(_ bannerView: GADBannerView) {
+        print("✅ Banner ad loaded")
+    }
+    
+    func bannerView(_ bannerView: GADBannerView, didFailToReceiveAdWithError error: Error) {
+        print("❌ Banner failed: \(error.localizedDescription)")
+    }
+}
+
+// MARK: - GADFullScreenContentDelegate
+extension AdManager: GADFullScreenContentDelegate {
+    func adDidDismissFullScreenContent(_ ad: GADFullScreenPresentingAd) {
+        print("✅ Ad dismissed")
+        isShowingAd = false
+        
+        // Reload the ad type that was just shown
+        if ad is GADInterstitialAd {
+            loadInterstitial()
+        } else if ad is GADRewardedAd {
+            loadRewarded()
+        }
+    }
+    
+    func ad(_ ad: GADFullScreenPresentingAd, didFailToPresentFullScreenContentWithError error: Error) {
+        print("❌ Ad failed to present: \(error.localizedDescription)")
+        isShowingAd = false
+    }
+    
+    func adWillPresentFullScreenContent(_ ad: GADFullScreenPresentingAd) {
+        print("📺 Ad will present")
+    }
+}
