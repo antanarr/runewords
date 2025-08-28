@@ -116,17 +116,14 @@ struct GameView: View {
                 Spacer()
             }
             
-            // Main content with geometry-driven layout (Slice 6)
+            // Main content 
             GeometryReader { geometry in
                 if isLoadingLevel {
                     loadingView
                 } else {
-                    let H = geometry.size.height
-                    let W = geometry.size.width
-                    
-                    // FIXED: Geometry-driven stack for better scaling
-                    VStack(spacing: 8) {
-                        // Header with safe area
+                    // FIXED: Optimized layout with better spacing
+                    VStack(spacing: 0) { // No spacing - control each gap individually
+                        // Header
                         HeaderView(
                             coins: viewModel.playerCoins,
                             animateCoinGain: $viewModel.animateCoinGain,
@@ -134,11 +131,10 @@ struct GameView: View {
                             storeAction: { showStore = true },
                             pauseAction: { showPauseMenu = true }
                         )
-                        .frame(height: 56)
                         .padding(.horizontal, 16)
-                        .safeAreaPadding(.top)
+                        .safeAreaPadding(.top)  // Proper safe area handling for header
                     
-                        // Words board with dynamic height
+                        // Words board - MAXIMIZE this area
                         WordsBoardView(
                             targets: viewModel.targetWords,
                             found: viewModel.foundWords,
@@ -147,25 +143,25 @@ struct GameView: View {
                         ) { anchors in
                             slotAnchors = anchors
                         }
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxHeight: min(calculateBoardHeight(for: viewModel.targetWords), H * 0.40))
                         .padding(.horizontal, 16)
+                        .padding(.top, 4)
+                        .frame(maxHeight: .infinity) // Take all available space
                     
-                        // Bonus chip
+                        // Bonus chip - moved closer to pill
                         HStack {
                             BonusChip(
                                 bonusCount: viewModel.bonusWordsFound.count,
                                 animNS: animNS,
                                 onTap: {
-                                    showBonusWords = true
+                                    if !viewModel.bonusWordsFound.isEmpty {
+                                        showBonusWords = true
+                                    }
                                 }
                             )
                             Spacer()
                         }
                         .padding(.horizontal, 16)
-                        .padding(.top, 4)
-                    
-                        Spacer(minLength: 16)
+                        .padding(.vertical, 6) // Small gap between board and pill
                     
                         // Current guess display
                         CurrentGuessPill(
@@ -174,15 +170,15 @@ struct GameView: View {
                             animatingWord: animatingWord,
                             animationNamespace: animNS
                         )
-                        .fixedSize()
-                        .padding(.vertical, 8)
+                        .padding(.bottom, 8)
                     
-                        // Adaptive wheel sizing based on remaining space
+                        // Wheel section
                         wheelSection(geometry: geometry)
-                            .frame(minHeight: 240, maxHeight: max(260, H * 0.28))
-                    
-                        Spacer(minLength: 8)
+                            .padding(.bottom, 8)
                     }
+                    // RW PATCH: Add identity based on current level
+                    .id(viewModel.currentLevel?.id ?? 0)
+                    // FIXED: Removed excessive blur - use proper sheet presentation
                     .animation(.easeOut(duration: 0.3), value: overlayActive)
                 }
                 
@@ -210,13 +206,20 @@ struct GameView: View {
             )
             .background(Color.clear)
         }
-        // FIXED: Use proper sheet presentation for modals
-        .sheet(isPresented: $viewModel.isLevelComplete) {
-            LevelCompleteView(
-                coinsEarned: viewModel.playerCoins,
-                onContinue: viewModel.advanceToNextLevel
-            )
+        // RW PATCH: Use transition with scale and opacity
+        .overlay {
+            if viewModel.isLevelComplete {
+                LevelCompleteView(
+                    coinsEarned: viewModel.levelCompleteReward,
+                    onContinue: {
+                        viewModel.advanceToNextLevelWithReset()
+                    }
+                )
+                .transition(.scale.combined(with: .opacity))
+                .zIndex(10)
+            }
         }
+        .animation(.easeOut(duration: 0.25), value: viewModel.isLevelComplete)
         .sheet(isPresented: $showStore) {
             StoreView()
         }
@@ -302,17 +305,15 @@ struct GameView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    // MARK: - Wheel Section - Adaptive sizing (Slice 6)
+    // MARK: - Wheel Section - FIXED sizing
     private func wheelSection(geometry: GeometryProxy) -> some View {
-        let W = geometry.size.width
-        let availableHeight = geometry.size.height * 0.5  // Use remaining height after board
+        let safeWidth = geometry.size.width - 32
         
-        // Calculate wheel size based on available space
+        // FIXED: Consistent wheel size that doesn't compete with words board
         let wheelSize = min(
-            W * 0.9,                    // Use most of width
-            availableHeight * 0.5,      // But don't exceed height constraints
-            360                         // Maximum size
-        ).clamped(to: 240...360)       // Ensure minimum usability
+            safeWidth * 0.75,      // Reasonable horizontal space
+            300                     // Fixed reasonable max
+        ).clamped(to: 260...300)   // Smaller range to give more room to words
         
         if UIAccessibility.isVoiceOverRunning {
             return AnyView(
@@ -391,18 +392,6 @@ struct GameView: View {
     }
     
     // MARK: - Helper Methods
-    private func calculateBoardHeight(for targets: [String]) -> CGFloat {
-        // Calculate needed height based on number of words and grouping
-        let groupedWords = Dictionary(grouping: targets) { $0.count }
-        let numberOfGroups = groupedWords.keys.count
-        let averageWordsPerGroup = CGFloat(targets.count) / CGFloat(max(numberOfGroups, 1))
-        let estimatedRows = ceil(averageWordsPerGroup / 3)  // Assume ~3 words per row
-        let tileHeight: CGFloat = 32  // Average tile height
-        let spacing: CGFloat = 10
-        
-        return (estimatedRows * tileHeight) + (estimatedRows * spacing) + 60  // Add padding
-    }
-    
     private func performShuffle() {
         HapticManager.shared.play(.light)
         AudioManager.shared.playSound(effect: .shuffle)
@@ -588,48 +577,82 @@ struct GameLetterWheelView: View {
     var isShuffling: Bool = false
     var wheelSize: CGFloat = 280
     
+    // Hit detection constants
+    private let tileDiameter: CGFloat = 55  // matches WheelTileView
+    private var hitRadius: CGFloat { tileDiameter * 0.45 }  // ≈ 24.75
+    
     @State private var selectedIndices: [Int] = []
     @State private var linePoints: [CGPoint] = []
-    @State private var dragEnded: Bool = false
+    @State private var pillState: PillState = .neutral
+    
+    enum PillState {
+        case neutral
+        case valid
+        case invalid
+    }
     @State private var positionsInitialized: Bool = false
     @State private var letterPositions: [CGPoint] = []
 
     var body: some View {
         let center = CGPoint(x: wheelSize / 2, y: wheelSize / 2)
         let radius = wheelSize * 0.35
-        let traceColor = Color.yellow.opacity(0.7)  // Constant opacity during drag (Slice 7)
-        
-        // Scale hit radius with wheel size (Slice 7)
-        let hitRadius = max(28, wheelSize * 0.06)
+        let traceColor = Color.yellow.opacity(0.7) // Always full opacity during drag
         
         let drag = DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
                 guard let index = letterIndex(at: value.location, radius: hitRadius) else { return }
+                
+                // Simple hysteresis: only switch tiles when clearly closer to the new one
+                if let last = selectedIndices.last, index != last {
+                    let lastPos = letterPositions[last]
+                    let newPos = letterPositions[index]
+                    let distToLast = hypot(value.location.x - lastPos.x, value.location.y - lastPos.y)
+                    let distToNew = hypot(value.location.x - newPos.x, value.location.y - newPos.y)
+                    
+                    // Require ~6pt advantage to switch
+                    guard distToNew + 6 < distToLast else { return }
+                }
+                
                 if let last = selectedIndices.last, index == last {
                     return
                 }
                 if selectedIndices.count >= 2 && index == selectedIndices[selectedIndices.count - 2] {
                     selectedIndices.removeLast()
-                    updateGuessAndLine(withValidation: false)  // No validation during drag
+                    updateGuessAndLine()
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     return
                 }
                 if !selectedIndices.contains(index) {
                     selectedIndices.append(index)
-                    updateGuessAndLine(withValidation: false)  // No validation during drag
+                    updateGuessAndLine()
                     AudioManager.shared.playSound(effect: .selectLetter)
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 }
+                // Keep pill neutral while dragging
+                pillState = .neutral
             }
             .onEnded { _ in
-                dragEnded = true
+                // Validate once at finger-up
+                if !currentGuess.isEmpty {
+                    let normalizedGuess = DictionaryService.normalizeWord(currentGuess)
+                    let isValid = DictionaryService.shared.isValidWord(normalizedGuess)
+                    pillState = isValid ? .valid : .invalid
+                    
+                    // Provide feedback based on validation
+                    if pillState == .invalid {
+                        HapticManager.shared.play(.error)
+                    } else {
+                        HapticManager.shared.play(.light)
+                    }
+                }
+                
                 onGestureEnd()
                 
-                // Clear state after brief delay
+                // Clear state after brief delay for visual feedback
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     selectedIndices.removeAll()
                     linePoints.removeAll()
-                    dragEnded = false
+                    pillState = .neutral
                 }
             }
 
@@ -698,13 +721,13 @@ struct GameLetterWheelView: View {
         return nil
     }
     
-    private func updateGuessAndLine(withValidation: Bool = true) {
+    private func updateGuessAndLine() {
         currentGuess = selectedIndices.map { String(letters[$0].char) }.joined()
         currentGuessIndices = selectedIndices.map { letters[$0].originalIndex }
         linePoints = selectedIndices.compactMap { 
             $0 < letterPositions.count ? letterPositions[$0] : nil
         }
-        // No validation during drag - handled in CurrentGuessPill
+        // No validation during drag - keep pill neutral
     }
 }
 
@@ -738,13 +761,6 @@ private struct WheelTileView: View {
     }
 }
 
-// MARK: - Guess Feedback States
-enum GuessFeedback {
-    case neutral
-    case success
-    case failure
-}
-
 private struct CurrentGuessPill: View {
     let guess: String
     let isForming: Bool
@@ -754,9 +770,9 @@ private struct CurrentGuessPill: View {
     @State private var pulseAnimation = false
     @State private var showHint = true
     @State private var hasInteracted = false
-    @State private var feedback: GuessFeedback = .neutral  // New feedback state
 
     var body: some View {
+        let isValidPrefix = guess.isEmpty || DictionaryService.shared.hasPrefix(guess)
         let shouldShowHint = guess.isEmpty && showHint && !hasInteracted
         let displayText = shouldShowHint ? "Drag to form words" : guess.uppercased()
         let isPlaceholder = guess.isEmpty
@@ -798,13 +814,13 @@ private struct CurrentGuessPill: View {
                 .overlay(
                     Capsule()
                         .strokeBorder(
-                            borderColorForFeedback(),
+                            borderColor(isValidPrefix: isValidPrefix, isEmpty: guess.isEmpty),
                             lineWidth: guess.isEmpty ? 1 : 2
                         )
                 )
         )
         .fixedCircleShadow(
-            color: shadowColorForFeedback(),
+            color: shadowColor(isValidPrefix: isValidPrefix, isEmpty: guess.isEmpty),
             blur: guess.isEmpty ? 3 : 8,
             cornerRadius: 50
         )
@@ -821,21 +837,6 @@ private struct CurrentGuessPill: View {
                 }
             }
         }
-        .onChange(of: isForming) { _, newValue in
-            if newValue {
-                // Reset to neutral when starting new drag
-                feedback = .neutral
-            } else if !guess.isEmpty {
-                // Set feedback only after finger-up
-                let isValid = DictionaryService.shared.hasPrefix(guess)
-                feedback = isValid ? .success : .failure
-                
-                // Reset after brief display
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    feedback = .neutral
-                }
-            }
-        }
         .onAppear {
             pulseAnimation = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -848,32 +849,22 @@ private struct CurrentGuessPill: View {
         .accessibilityLabel(guess.isEmpty ? "Word formation area" : "Current word: \(guess)")
     }
     
-    private func borderColorForFeedback() -> Color {
-        if guess.isEmpty {
+    private func borderColor(isValidPrefix: Bool, isEmpty: Bool) -> Color {
+        if isEmpty {
             return Color.white.opacity(0.2)
-        }
-        
-        switch feedback {
-        case .neutral:
-            return Color.white.opacity(0.2)
-        case .success:
+        } else if isValidPrefix {
             return Color.green.opacity(0.8)
-        case .failure:
+        } else {
             return Color.red.opacity(0.8)
         }
     }
     
-    private func shadowColorForFeedback() -> Color {
-        if guess.isEmpty {
+    private func shadowColor(isValidPrefix: Bool, isEmpty: Bool) -> Color {
+        if isEmpty {
             return Color.clear
-        }
-        
-        switch feedback {
-        case .neutral:
-            return Color.white.opacity(0.1)
-        case .success:
+        } else if isValidPrefix {
             return Color.green.opacity(0.3)
-        case .failure:
+        } else {
             return Color.red.opacity(0.3)
         }
     }
@@ -954,43 +945,24 @@ struct BonusWordsListView: View {
                     .font(.custom("Cinzel-Bold", size: 28))
                     .foregroundStyle(.white)
                 
-                if words.isEmpty {
-                    // Empty state
-                    VStack(spacing: 16) {
-                        Image(systemName: "star.slash")
-                            .font(.system(size: 48))
-                            .foregroundStyle(.white.opacity(0.5))
-                        
-                        Text("No bonus words yet")
-                            .font(.custom("Cinzel-Regular", size: 18))
-                            .foregroundStyle(.white.opacity(0.7))
-                        
-                        Text("Find valid words that aren't\npart of the main puzzle!")
-                            .font(.system(size: 14))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(40)
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 10) {
-                            ForEach(words.sorted(), id: \.self) { word in
-                                Text(word.uppercased())
-                                    .font(.custom("Cinzel-Regular", size: 18))
-                                    .foregroundStyle(.white)
-                                    .padding(10)
-                                    .frame(maxWidth: .infinity)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .fill(.yellow.opacity(0.2))
-                                            .strokeBorder(.yellow.opacity(0.5), lineWidth: 1)
-                                    )
-                            }
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 10) {
+                        ForEach(words.sorted(), id: \.self) { word in
+                            Text(word.uppercased())
+                                .font(.custom("Cinzel-Regular", size: 18))
+                                .foregroundStyle(.white)
+                                .padding(10)
+                                .frame(maxWidth: .infinity)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(.yellow.opacity(0.2))
+                                        .strokeBorder(.yellow.opacity(0.5), lineWidth: 1)
+                                )
                         }
-                        .padding()
                     }
-                    .frame(maxHeight: 400)
+                    .padding()
                 }
+                .frame(maxHeight: 400)
                 
                 Button("Close") {
                     isPresented = false

@@ -33,7 +33,13 @@ extension GameViewModel {
     
     // MARK: - Level Setup
     func setupLevel(level: Level) {
-        print("🎮 Setting up level \(level.id)")
+        // Ignore same-level re-setup to prevent whiplash
+        if currentLevel?.id == level.id {
+            print("🎮 Ignoring same-level setup for level \(level.id)")
+            return
+        }
+        
+        print("🎮 LEVEL_START: Setting up level \(level.id)")
         print("  - Base letters: \(level.baseLetters) (\(level.baseLetters.count) letters)")
         print("  - Solutions: \(level.solutions)")
         
@@ -109,6 +115,10 @@ extension GameViewModel {
         consecutiveFailedGuesses = 0
         levelsPlayedSinceHint += 1
         hintsUsedCount = 0  // Reset hints count for new level
+        // RW PATCH: Reset bonus words state
+        bonusWordsFound.removeAll()
+        bonusCount = 0
+        showBonusSheet = false
     }
     
     private func buildGrid(for level: Level) {
@@ -153,9 +163,13 @@ extension GameViewModel {
     
     private func restoreLevelProgress(for level: Level) {
         if let player = playerService.player,
-           let progress = player.levelProgress[String(level.id)] {
-            self.foundWords = progress
-            for word in progress {
+           let progress = player.levelProgress[StringCanonicalizer.levelKey(level.id)] {
+            // Canonicalize all restored words
+            let canonProgress = Set(progress.map { StringCanonicalizer.canon($0) })
+            self.foundWords = canonProgress
+            
+            // Reveal each word in the grid
+            for word in canonProgress {
                 revealWordInGrid(word)
             }
         } else {
@@ -232,6 +246,11 @@ extension GameViewModel {
         errorMessage = ""
         consecutiveFailedGuesses = 0
         hintsUsedCount = 0  // Reset hints count on level reset
+        
+        // RW PATCH: Reset ephemeral state
+        bonusCount = 0
+        showBonusSheet = false
+        lastSubmittedWord = nil
         
         // Clear animation states
         animatingWordToSlot = nil

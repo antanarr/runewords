@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import FirebaseFirestore
 import SwiftUI
 
 enum Difficulty: String, Codable, Comparable {
@@ -97,8 +98,7 @@ struct Level: Codable, Identifiable {
 
 // Represents the player's persistent data in Firestore.
 struct Player: Codable, Identifiable {
-    var id: String?  // Remove @DocumentID - we handle this manually
-    let uid: String  // Store uid as normal field
+    @DocumentID var id: String?
     var currentLevelID: Int
     var coins: Int
     var levelProgress: [String: Set<String>]
@@ -121,7 +121,6 @@ struct Player: Codable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case id
-        case uid
         case currentLevelID
         case coins
         case levelProgress
@@ -147,7 +146,6 @@ struct Player: Codable, Identifiable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         
         id = try container.decodeIfPresent(String.self, forKey: .id)
-        uid = try container.decode(String.self, forKey: .uid)
         currentLevelID = try container.decode(Int.self, forKey: .currentLevelID)
         coins = try container.decode(Int.self, forKey: .coins)
         
@@ -172,7 +170,6 @@ struct Player: Codable, Identifiable {
     // Memberwise initializer.
     init(
         id: String? = nil,
-        uid: String,
         currentLevelID: Int,
         coins: Int,
         levelProgress: [String: Set<String>],
@@ -193,7 +190,6 @@ struct Player: Codable, Identifiable {
         perfectLevels: Int = 0
     ) {
         self.id = id
-        self.uid = uid
         self.currentLevelID = currentLevelID
         self.coins = coins
         self.levelProgress = levelProgress
@@ -217,7 +213,7 @@ struct Player: Codable, Identifiable {
 
 // Transport struct for player analytics and state.
 struct PlayerData: Codable {
-    var id: String  // No default UUID - will be set from uid
+    var id: String = UUID().uuidString
     let completedLevelIDs: Set<Int>
     let usesHintsOften: Bool
     let isStruggling: Bool
@@ -246,7 +242,7 @@ struct PlayerData: Codable {
     
     // Custom init with default values for new fields
     init(
-        id: String,
+        id: String = UUID().uuidString,
         completedLevelIDs: Set<Int>,
         usesHintsOften: Bool,
         isStruggling: Bool,
@@ -304,7 +300,7 @@ extension Player {
         let isStruggling = consecutiveFailedGuesses > 5
         
         return PlayerData(
-            id: uid,
+            id: id ?? UUID().uuidString,
             completedLevelIDs: completedIDs,
             usesHintsOften: usesHintsOften,
             isStruggling: isStruggling,
@@ -334,8 +330,7 @@ extension PlayerData {
     /// Convert PlayerData back to Player
     func toPlayer() -> Player {
         return Player(
-            id: nil,  // Never set id when converting back
-            uid: id,  // Use PlayerData.id as uid
+            id: id,
             currentLevelID: currentLevelID,
             coins: coins,
             levelProgress: levelProgress,

@@ -23,17 +23,20 @@ final class ProgressService: ObservableObject {
                 return
             }
             
-            // Create new player document
+            // Create new player document with proper defaults
             let username = "Seeker-\(Int.random(in: 1000...9999))"
             try await ref.setData([
                 "username": username,
                 "createdAt": FieldValue.serverTimestamp(),
                 "lastSeenAt": FieldValue.serverTimestamp(),
-                "lastLevelId": FieldValue.delete(), // none yet
-                "coins": 0,
+                "currentLevelID": 1,  // Default to level 1 instead of delete
+                "coins": 50,  // Starting coins
                 "totalLevelsCompleted": 0,
                 "totalHintsUsed": 0,
-                "totalBonusWords": 0
+                "totalBonusWords": 0,
+                "levelProgress": [:],
+                "foundBonusWords": [],
+                "preferredDifficulty": "easy"
             ])
             print("✅ Progress: Created player doc for \(uid) as \(username)")
         } catch {

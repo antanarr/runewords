@@ -7,17 +7,35 @@ extension GameViewModel {
     
     // MARK: - Guess Submission (FIXED to match described flow)
     func submitGuess() {
+        // Atomic guard: prevent double submissions
+        guard !isGuessInFlight else {
+            print("⚠️ Ignoring guess submission - already processing")
+            return
+        }
+        
         // Debounce: ignore submissions during animation
         if animatingWordToSlot != nil || animatingWordToBonus != nil {
             print("⚠️ Ignoring guess submission during animation")
             return
         }
         
-        // Step 1: Normalize - uppercase the guess
-        let submittedGuess = currentGuess.uppercased()
+        isGuessInFlight = true
+        defer { 
+            DispatchQueue.main.async {
+                self.isGuessInFlight = false
+            }
+        }
+        
+        // Step 1: Canonicalize the guess (uppercase, remove diacritics, trim)
+        let submittedGuess = StringCanonicalizer.canon(currentGuess)
         let submittedIndices = currentGuessIndices
         
-        print("📝 Submitting guess: \(submittedGuess) with indices: \(submittedIndices)")
+        // Telemetry
+        print("🔍 TELEMETRY | Submit:")
+        print("  - Raw: '\(currentGuess)'")
+        print("  - Canon: '\(submittedGuess)'")
+        print("  - LevelKey: '\(StringCanonicalizer.levelKey(currentLevel?.id ?? 0))'")
+        print("  - Indices: \(submittedIndices)")
         
         // Keep current guess for animation
         let animationWord = submittedGuess
@@ -53,12 +71,22 @@ extension GameViewModel {
                 }
                 
                 // Valid solution found!
-                print("  ✅ Valid solution with correct indices!")
+                print("  ✅ VALID_SOLUTION: \(submittedGuess) | audio=positive | persisted=pending")
+                
+                // Add to local optimistic set immediately
+                foundWords.insert(submittedGuess)
+                
+                // Then trigger animations and persist
                 triggerPillToSlotAnimation(word: animationWord)
+                audioManager.playSound(effect: .success)
+                HapticManager.shared.play(.success)
+                
+                // RW PATCH: Use handleAcceptedSolution for proper timing
+                handleAcceptedSolution(submittedGuess)
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     guard var player = self.playerService.player else { return }
-                    let levelIDString = String(level.id)
+                    let levelIDString = StringCanonicalizer.levelKey(level.id)
                     self.handleCorrectSolution(submittedGuess, player: &player, levelID: levelIDString)
                 }
                 return
@@ -71,17 +99,25 @@ extension GameViewModel {
         // Step 4: Bonus check (only if not a target)
         // First check if it can be made from base letters
         if canMakeWordFromBaseLetters(submittedGuess) {
-            // Check dictionary - pass raw string (DictionaryService normalizes internally)
+            // Check dictionary with canonicalized string
             if dictionaryService.isValidWord(submittedGuess) {
-                // Step 5: Check for duplicates
-                if bonusWordsFound.contains(submittedGuess) {
-                    handleDuplicateWord(submittedGuess)
+                // Step 5: Check for duplicates (canonicalized comparison)
+                let canonBonus = StringCanonicalizer.canon(submittedGuess)
+                if bonusWordsFound.contains(canonBonus) {
+                    handleDuplicateWord(canonBonus)
                     return
                 }
                 
                 // Valid bonus word!
-                print("  ✅ Valid bonus word!")
+                print("  ✅ VALID_BONUS: \(submittedGuess) | audio=bonus | persisted=pending")
+                
+                // Add to local optimistic set immediately
+                bonusWordsFound.insert(canonBonus)
+                
+                // Then trigger animations and persist
                 triggerPillToBonusAnimation(word: animationWord)
+                audioManager.playSound(effect: .bonus)
+                HapticManager.shared.play(.light)
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     guard var player = self.playerService.player else { return }
@@ -92,6 +128,7 @@ extension GameViewModel {
         }
         
         // Not a valid word
+        print("  ❌ INVALID_GUESS: \(submittedGuess) | audio=negative | persisted=false")
         handleInvalidWord(submittedGuess)
     }
     
@@ -99,15 +136,15 @@ extension GameViewModel {
     func canMakeWordFromBaseLetters(_ word: String) -> Bool {
         guard let baseLetters = currentLevel?.baseLetters else { return false }
         
-        // Count letter frequencies in base
+        // Count letter frequencies in base (canonicalized)
         var baseCount: [Character: Int] = [:]
-        for char in baseLetters.uppercased() {
+        for char in StringCanonicalizer.canon(baseLetters) {
             baseCount[char, default: 0] += 1
         }
         
-        // Count letter frequencies in word
+        // Count letter frequencies in word (canonicalized)
         var wordCount: [Character: Int] = [:]
-        for char in word.uppercased() {
+        for char in StringCanonicalizer.canon(word) {
             wordCount[char, default: 0] += 1
         }
         
@@ -123,53 +160,59 @@ extension GameViewModel {
     
     // MARK: - Submission Handlers
     private func handleCorrectSolution(_ word: String, player: inout Player, levelID: String) {
-        // Add to found words
-        foundWords.insert(word)
-        audioManager.playSound(effect: .success)
-        HapticManager.shared.play(.success)
+        let canonWord = StringCanonicalizer.canon(word)
+        let levelKey = StringCanonicalizer.levelKey(Int(levelID) ?? 0)
         
-        // Update progress
-        var progressForLevel = player.levelProgress[levelID, default: []]
-        progressForLevel.insert(word)
-        player.levelProgress[levelID] = progressForLevel
+        // Don't add to found words here - already added optimistically
+        // Don't play audio here - already played in submitGuess
         
-        // Award coins based on word length
+        // Update progress locally
+        var progressForLevel = player.levelProgress[levelKey, default: []]
+        progressForLevel.insert(canonWord)
+        player.levelProgress[levelKey] = progressForLevel
+        
+        // Calculate rewards
         let wordReward = Config.Economy.wordReward(for: word.count)
-        player.coins += wordReward
+        var totalReward = wordReward
         
         // Bonus for long words
         if word.count >= 6 {
-            player.coins += Config.Economy.longWordBonus
+            totalReward += Config.Economy.longWordBonus
         }
         
+        // Update player locally
+        player.coins += totalReward
         playerCoins = player.coins
-        
-        // Save progress
         playerService.player = player
-        playerService.saveProgress(player: player.toPlayerData())
+        
+        // Use batch update for Firestore to prevent half-applied states
+        Task {
+            await MainActor.run {
+                self.playerService.applyWordFind(levelId: levelKey, word: canonWord, reward: totalReward)
+            }
+        }
         
         // Visual effects
         Task {
-            await revealWordInGridWithAnimation(word)
+            await revealWordInGridWithAnimation(canonWord)
         }
         
         triggerCoinAnimation()
-        lastFoundWord = word
+        lastFoundWord = canonWord
         
         // Update combo
         updateCombo()
         
-        // Trigger particles (would need actual UI position)
+        // Trigger particles
         let position = CGPoint(x: 200, y: 400)
-        triggerWordCompletionParticles(at: position, for: word)
-        triggerCoinBurstEffect(from: position, to: CGPoint(x: 100, y: 100), coinCount: wordReward)
+        triggerWordCompletionParticles(at: position, for: canonWord)
+        triggerCoinBurstEffect(from: position, to: CGPoint(x: 100, y: 100), coinCount: totalReward)
         
         // Reset difficulty tracking
         consecutiveFailedGuesses = 0
         
-        // Step 6: Single source of truth for completion - check if all targets found (and record in Firestore)
-        // SINGLE SOURCE OF TRUTH: Only checkAndRecordLevelCompletionIfNeeded handles completion
-        Task { await self.checkAndRecordLevelCompletionIfNeeded() }
+        // RW PATCH: Removed duplicate completion check - handleAcceptedSolution handles it
+        // Task { await self.checkAndRecordLevelCompletionIfNeeded() }
         
         // Clear last found word after delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
@@ -178,51 +221,46 @@ extension GameViewModel {
     }
     
     private func handleBonusWord(_ word: String, player: inout Player) {
-        // Atomic insert to check if this is truly new
-        let (inserted, _) = bonusWordsFound.insert(word)
-        guard inserted else {
-            // Already found before - should not happen due to duplicate check above
-            print("⚠️ Bonus word already in set: \(word)")
-            return
-        }
+        let canonWord = StringCanonicalizer.canon(word)
         
-        audioManager.playSound(effect: .bonus)
-        HapticManager.shared.play(.light)
+        // Don't add to bonus words here - already added optimistically
+        // Don't play audio here - already played in submitGuess
         
-        // Update player - atomic insert again for persistence
-        let (playerInserted, _) = player.foundBonusWords.insert(word)
-        if playerInserted {
-            // Only award coins if truly new to player's lifetime collection
-            let bonusReward = Config.Economy.defaultBonusWordReward
-            player.coins += bonusReward
-            playerCoins = player.coins
-            
-            // Visual feedback for coin gain
-            triggerCoinAnimation()
-            
-            // Show bonus message with reward amount
-            appState.showOverlay(.hint("Bonus word! +\(bonusReward) coins"))
-            
-            // Particles with cleanup
-            let position = CGPoint(x: 200, y: 400)
-            triggerWordCompletionParticles(at: position, for: word)
-            triggerCoinBurstEffect(from: position, to: CGPoint(x: 100, y: 100), coinCount: bonusReward)
-        } else {
-            print("ℹ️ Bonus word already in player's lifetime collection: \(word)")
-        }
+        // Calculate reward
+        let bonusReward = calculateBonusWordReward(word: word)
         
-        // Save progress
+        // Update player model locally
+        player.foundBonusWords.insert(canonWord)
+        player.coins += bonusReward
+        playerCoins = player.coins
+        
+        // Update local state
         playerService.player = player
-        playerService.saveProgress(player: player.toPlayerData())
         
-        // Update combo
+        // Use batch update for Firestore to prevent half-applied states
+        Task {
+            await MainActor.run {
+                self.playerService.applyBonusWord(canonWord, reward: bonusReward)
+            }
+        }
+        
+        // Visual feedback
+        triggerCoinAnimation()
         updateCombo()
+        
+        // Particles with cleanup
+        let position = CGPoint(x: 200, y: 400)
+        triggerWordCompletionParticles(at: position, for: word)
+        triggerCoinBurstEffect(from: position, to: CGPoint(x: 100, y: 100), coinCount: bonusReward)
         
         // Check achievements
         checkAchievements(bonusWordFound: true)
         
         // Reset difficulty
         consecutiveFailedGuesses = 0
+        
+        // Show bonus message with reward amount
+        appState.showOverlay(.hint("Bonus word! +\(bonusReward) coins"))
     }
     
     private func handleInvalidWord(_ word: String) {
@@ -258,8 +296,10 @@ extension GameViewModel {
     
     // MARK: - Word Reward Calculation
     private func calculateBonusWordReward(word: String) -> Int {
-        // Per work order: Keep it simple - fixed reward or length-based
-        return Config.Economy.defaultBonusWordReward
+        // Scale bonus word rewards by length
+        let baseBonusReward = bonusWordReward
+        let lengthMultiplier = max(1, word.count - 2) // 3-letter = 1x, 4-letter = 2x, etc.
+        return baseBonusReward * lengthMultiplier * comboMultiplier
     }
     
     // MARK: - Level Completion Check

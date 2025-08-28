@@ -2,27 +2,7 @@ import Foundation
 import Combine
 import SwiftUI
 import FirebaseFirestore
-
-// MARK: - Catalog Readiness State
-actor CatalogState {
-    private var ready = false
-    
-    func setReady() {
-        self.ready = true
-    }
-    
-    func isReady() -> Bool {
-        return ready
-    }
-    
-    func waitUntilReady(timeout: TimeInterval = 1.5) async -> Bool {
-        let startTime = Date()
-        while !ready && Date().timeIntervalSince(startTime) < timeout {
-            try? await Task.sleep(nanoseconds: 80_000_000) // 80ms
-        }
-        return ready
-    }
-}
+import OSLog
 
 /// Service for managing game levels with catalog-based indexing
 /// WO-001: Refactored to use LevelCatalog for robust level management
@@ -30,9 +10,6 @@ actor CatalogState {
 @MainActor
 final class LevelService: ObservableObject {
     static let shared = LevelService()
-    
-    // MARK: - Catalog Readiness (Slice 4)
-    let catalogState = CatalogState()
     
     // MARK: - Catalog Source Configuration
     enum CatalogSource: String {
@@ -43,27 +20,37 @@ final class LevelService: ObservableObject {
     @Published var currentCatalogSource: CatalogSource = .local
     @Published var catalogVersion: String = "1.0.0"
     
-    // MARK: - Bootstrap Level (P0 Fix + Slice 5 corrections)
+    // MARK: - Bootstrap Level (P0 Fix)
     static let bootstrap = Level(
         id: 1000001,
         realm: "Tree Library",
-        baseLetters: "SAINTE",  // Changed to ensure isogram availability
+        baseLetters: "RETAIN",
         solutions: [
-            // 6-letter isogram (required)
-            "SAINTE": [0, 1, 2, 3, 4, 5],  // 6-letter isogram
-            // 5-letter words
-            "SATIN": [0, 1, 4, 2, 3],      // 5-letter
-            "SAINT": [0, 1, 2, 3, 4],      // 5-letter  
-            "STAIN": [0, 4, 1, 2, 3],      // 5-letter
-            // 4-letter words only (no 3-letter in solutions)
-            "SANE": [0, 1, 3, 5],          // 4-letter
-            "ANTE": [1, 3, 4, 5],          // 4-letter
-            "EAST": [5, 1, 0, 4],          // 4-letter
-            "NEAT": [3, 5, 1, 4],          // 4-letter
-            "NEST": [3, 5, 0, 4],          // 4-letter
-            "SEAT": [0, 5, 1, 4]           // 4-letter
+            "RETAIN": [0, 1, 2, 3, 4, 5],  // 6-letter pangram
+            "TRAIN": [2, 0, 3, 4, 5],      // 5-letter
+            "INTER": [4, 5, 2, 1, 0],      // 5-letter  
+            "INERT": [4, 5, 1, 0, 2],      // 5-letter
+            "RAIN": [0, 3, 4, 5],          // 4-letter
+            "RATE": [0, 3, 2, 1],          // 4-letter
+            "TEAR": [2, 1, 3, 0],          // 4-letter
+            "TIRE": [2, 4, 0, 1],          // 4-letter
+            "NEAR": [5, 1, 3, 0],          // 4-letter
+            "NEAT": [5, 1, 3, 2],          // 4-letter
+            "ANT": [3, 5, 2],              // 3-letter
+            "ART": [3, 0, 2],              // 3-letter
+            "ATE": [3, 2, 1],              // 3-letter
+            "EAR": [1, 3, 0],              // 3-letter
+            "EAT": [1, 3, 2],              // 3-letter
+            "NET": [5, 1, 2],              // 3-letter
+            "RAN": [0, 3, 5],              // 3-letter
+            "RAT": [0, 3, 2],              // 3-letter
+            "TAN": [2, 3, 5],              // 3-letter
+            "TAR": [2, 3, 0],              // 3-letter
+            "TEA": [2, 1, 3],              // 3-letter
+            "TEN": [2, 1, 5],              // 3-letter
+            "TIE": [2, 4, 1]               // 3-letter
         ],
-        bonusWords: ["SIT", "TAN", "TEN", "TEA", "TIE", "NET", "ANT", "ATE", "EAT", "SAT"], // 3-letter words are bonus
+        bonusWords: ["RET", "REI", "ETA", "ERA", "ANE", "ANI", "IRE", "NIT"], // Bonus words
         metadata: LevelMetadata(
             difficulty: .easy,
             theme: "treelibrary",
@@ -153,8 +140,6 @@ final class LevelService: ObservableObject {
         } else if totalLevelCount > 0 {
             // Already loaded with correct source
             print("[Levels] Already loaded with source: \(currentCatalogSource.rawValue), count: \(totalLevelCount)")
-            // Mark as ready since we already have data
-            await catalogState.setReady()
             return
         }
         
@@ -173,8 +158,6 @@ final class LevelService: ObservableObject {
                 try await loadFromFirestore()
                 self.currentCatalogSource = .remote
                 print("[Levels] REMOTE OK · loaded=\(self.totalLevelCount)")
-                // Mark catalog as ready after successful remote load
-                await catalogState.setReady()
                 return // Success, don't fall back
             } catch {
                 print("[Levels] ⚠️ Firestore load failed: \(error)")
@@ -187,9 +170,6 @@ final class LevelService: ObservableObject {
         await loadLocalCatalog()
         self.currentCatalogSource = .local
         print("[Levels] LOCAL fallback · loaded=\(self.totalLevelCount)")
-        
-        // Mark catalog as ready after loading
-        await catalogState.setReady()
     }
     
     /// Get a level by ID
@@ -416,7 +396,7 @@ final class LevelService: ObservableObject {
         
         guard !fixed.isEmpty else { return nil }
         
-        let level = Level(
+        return Level(
             id: id,
             realm: realm,
             baseLetters: BASE,
@@ -424,20 +404,6 @@ final class LevelService: ObservableObject {
             bonusWords: bonusClean,
             metadata: nil
         )
-        
-        // Validate sanitized level (Slice 5)
-        let validation = LevelSanity.validate(level: level)
-        if !validation.ok {
-            print("⚠️ Firestore level \(id) validation issue: \(validation.reason)")
-            // Still return the level but log the issue
-            AnalyticsManager.shared.logEvent("firestore_level_validation_warning", parameters: [
-                "level_id": id,
-                "reason": validation.reason,
-                "realm": realm ?? "unknown"
-            ])
-        }
-        
-        return level
     }
     
     private func loadFromFirestore() async throws {
@@ -701,20 +667,14 @@ final class LevelService: ObservableObject {
     /// Fetch a specific level using catalog-based lookup - FULLY ASYNC
     @MainActor
     func fetchLevel(id: Int) async {
+        // IDEMPOTENT: Skip if already on this level
+        if currentLevel?.id == id {
+            Logger.game.debug("SETUP_LEVEL idempotent skip id=\(id)")
+            return
+        }
+        
         // Special handling for bootstrap level
         if id == Self.bootstrap.id {
-            // Validate bootstrap level (Slice 5)
-            let validation = LevelSanity.validate(level: Self.bootstrap, dict: DictionaryService.shared)
-            if !validation.ok {
-                print("⚠️ Bootstrap level validation failed: \(validation.reason)")
-                // Log analytics event
-                AnalyticsManager.shared.logEvent("level_validation_failed", parameters: [
-                    "level_id": Self.bootstrap.id,
-                    "reason": validation.reason,
-                    "source": "bootstrap"
-                ])
-            }
-            
             self.currentLevel = Self.bootstrap
             self.solutionFormats = parseSolutionFormats(for: Self.bootstrap)
             print("✅ Loaded bootstrap level")
@@ -740,30 +700,6 @@ final class LevelService: ObservableObject {
         // Load the file containing this level
         if let levels = await loadLevelFile(path: entry.file) {
             if let level = levels.first(where: { $0.id == id }) {
-                // Validate level before using (Slice 5)
-                let validation = LevelSanity.validate(level: level, dict: DictionaryService.shared)
-                if !validation.ok {
-                    print("⚠️ Level \(id) validation failed: \(validation.reason)")
-                    
-                    // Log analytics event
-                    AnalyticsManager.shared.logEvent("level_validation_failed", parameters: [
-                        "level_id": id,
-                        "reason": validation.reason,
-                        "source": currentCatalogSource.rawValue
-                    ])
-                    
-                    // Show user-friendly error and block progression
-                    await MainActor.run {
-                        ToastManager.shared.showError("Level data issue detected. Please update the app.")
-                    }
-                    
-                    // Don't use invalid level - try to fall back to bootstrap
-                    self.currentLevel = Self.bootstrap
-                    self.solutionFormats = parseSolutionFormats(for: Self.bootstrap)
-                    print("⚠️ Falling back to bootstrap due to validation failure")
-                    return
-                }
-                
                 self.currentLevel = level
                 self.solutionFormats = parseSolutionFormats(for: level)
                 print("✅ Loaded Level \(id) from \(entry.file)")
@@ -1001,189 +937,6 @@ final class LevelService: ObservableObject {
         #endif
     }
     
-    // MARK: - Level Sanity Checks (Slice 5)
-    
-    struct LevelSanity {
-        /// Check if a word is an isogram (no repeated letters)
-        static func isIsogram(_ word: String) -> Bool {
-            let chars = Array(word.uppercased())
-            return Set(chars).count == chars.count
-        }
-        
-        /// Check if level has at least one 6-letter isogram that can be made from base letters
-        static func hasIso6(base: String, solutions: [String: [Int]], dict: DictionaryService? = nil) -> Bool {
-            let baseChars = Array(base.uppercased())
-            
-            // Check if any solution is a 6-letter isogram
-            for (word, _) in solutions {
-                if word.count == 6 && isIsogram(word) {
-                    return true
-                }
-            }
-            
-            // If no 6-letter isogram in solutions, check if base letters allow one
-            // Base must be an isogram itself to potentially form 6-letter isograms
-            if base.count == 6 && isIsogram(base) {
-                // If we have dictionary access, check for possible 6-letter isograms
-                if let dict = dict {
-                    // Generate all possible 6-letter permutations and check
-                    let possibleWords = generatePermutations(from: baseChars, length: 6)
-                    for word in possibleWords {
-                        if isIsogram(word) && dict.isValidWord(word) {
-                            return true
-                        }
-                    }
-                } else {
-                    // Without dictionary, assume isogram base can form valid 6-letter isograms
-                    return true
-                }
-            }
-            
-            return false
-        }
-        
-        /// Generate permutations (simplified - just checking if theoretically possible)
-        private static func generatePermutations(from chars: [Character], length: Int) -> [String] {
-            // For performance, just check a few common patterns rather than all permutations
-            // This is sufficient for validation purposes
-            guard chars.count >= length else { return [] }
-            
-            var results: [String] = []
-            
-            // Just return the base as one possibility for now
-            // Full permutation generation would be expensive
-            if chars.count == length {
-                results.append(String(chars))
-            }
-            
-            return results
-        }
-        
-        /// Verify word can be made from base letters with correct indices
-        static func verifyWordIndices(word: String, indices: [Int], base: String) -> Bool {
-            let baseChars = Array(base.uppercased())
-            let wordChars = Array(word.uppercased())
-            
-            // Check indices match word length
-            if indices.count != wordChars.count {
-                return false
-            }
-            
-            // Check each index is valid and maps to correct letter
-            for (i, idx) in indices.enumerated() {
-                if idx < 0 || idx >= baseChars.count {
-                    return false
-                }
-                if baseChars[idx] != wordChars[i] {
-                    return false
-                }
-            }
-            
-            return true
-        }
-        
-        /// Validate level meets all requirements
-        static func validate(level: Level, dict: DictionaryService? = nil) -> (ok: Bool, reason: String) {
-            // 1. Base letters must be exactly 6 uppercase letters
-            if level.baseLetters.count != 6 {
-                return (false, "Base letters must be exactly 6 characters (found \(level.baseLetters.count))")
-            }
-            
-            if !level.baseLetters.allSatisfy({ $0.isLetter && $0.isUppercase }) {
-                return (false, "Base letters must all be uppercase letters")
-            }
-            
-            // 2. Solutions must be 4-6 letters only (3-letter words go to bonus)
-            if level.solutions.isEmpty {
-                return (false, "Level must have at least one solution")
-            }
-            
-            for (word, indices) in level.solutions {
-                // Check word length
-                if word.count < 4 || word.count > 6 {
-                    return (false, "Solution '\(word)' has invalid length \(word.count) - must be 4-6 letters")
-                }
-                
-                // Verify word is uppercase
-                if word != word.uppercased() {
-                    return (false, "Solution '\(word)' must be uppercase")
-                }
-                
-                // Verify indices
-                if !verifyWordIndices(word: word, indices: indices, base: level.baseLetters) {
-                    return (false, "Solution '\(word)' has invalid indices \(indices) for base '\(level.baseLetters)'")
-                }
-                
-                // Optional: Check word is valid in dictionary
-                if let dict = dict, !dict.isValidWord(word) {
-                    return (false, "Solution '\(word)' is not in dictionary")
-                }
-            }
-            
-            // 3. Must have at least one 6-letter isogram
-            if !hasIso6(base: level.baseLetters, solutions: level.solutions, dict: dict) {
-                return (false, "Level must have at least one 6-letter isogram from base '\(level.baseLetters)'")
-            }
-            
-            // 4. Verify no duplicate solutions
-            let solutionWords = Array(level.solutions.keys)
-            if Set(solutionWords).count != solutionWords.count {
-                return (false, "Level has duplicate solutions")
-            }
-            
-            // 5. Bonus words should be 3-6 letters and not in solutions
-            let solutionSet = Set(level.solutions.keys)
-            var bonusSet = Set<String>()
-            
-            for bonus in level.bonusWords {
-                // Check length
-                if bonus.count < 3 || bonus.count > 6 {
-                    return (false, "Bonus word '\(bonus)' has invalid length \(bonus.count)")
-                }
-                
-                // Check uppercase
-                if bonus != bonus.uppercased() {
-                    return (false, "Bonus word '\(bonus)' must be uppercase")
-                }
-                
-                // Check not in solutions
-                if solutionSet.contains(bonus) {
-                    return (false, "Bonus word '\(bonus)' is also in solutions")
-                }
-                
-                // Check for duplicates in bonus list
-                if bonusSet.contains(bonus) {
-                    return (false, "Bonus word '\(bonus)' appears multiple times")
-                }
-                bonusSet.insert(bonus)
-                
-                // Optional: Verify bonus word can be made from base
-                if !canMakeWord(bonus, from: level.baseLetters) {
-                    return (false, "Bonus word '\(bonus)' cannot be made from base letters '\(level.baseLetters)'")
-                }
-            }
-            
-            return (true, "Valid")
-        }
-        
-        /// Helper to check if word can be made from base letters
-        private static func canMakeWord(_ word: String, from base: String) -> Bool {
-            var letterCounts: [Character: Int] = [:]
-            for char in base.uppercased() {
-                letterCounts[char, default: 0] += 1
-            }
-            
-            for char in word.uppercased() {
-                guard let count = letterCounts[char], count > 0 else {
-                    return false
-                }
-                letterCounts[char] = count - 1
-            }
-            
-            return true
-        }
-    }
-    
     // MARK: - Level Data Normalization
     
     /// Normalize level data at load time (uppercase, fix indices, validate)
@@ -1218,28 +971,10 @@ final class LevelService: ObservableObject {
                 normalizedSolutions[uppercasedWord] = fixedIndices
             }
             
-            // Move 3-letter words from solutions to bonus (Slice 5 requirement)
-            var finalSolutions: [String: [Int]] = [:]
-            var bonusFromSolutions: Set<String> = []
-            
-            for (word, indices) in normalizedSolutions {
-                if word.count >= 4 && word.count <= 6 {
-                    // Keep 4-6 letter words as solutions
-                    finalSolutions[word] = indices
-                } else if word.count == 3 {
-                    // Move 3-letter words to bonus
-                    bonusFromSolutions.insert(word)
-                }
-                // Ignore words outside 3-6 range
-            }
-            
-            // Normalize bonus words and merge with 3-letter words from solutions
-            let solutionSet = Set(finalSolutions.keys)
-            let normalizedBonusWords = Array(
-                Set(level.bonusWords.map { $0.uppercased() })
-                    .union(bonusFromSolutions)
-                    .subtracting(solutionSet)
-            )
+            // Normalize bonus words and ensure they don't overlap with solutions
+            let solutionSet = Set(normalizedSolutions.keys)
+            let normalizedBonusWords = Array(Set(level.bonusWords.map { $0.uppercased() })
+                .subtracting(solutionSet))
             
             #if DEBUG
             // 5) DEBUG guardrails
@@ -1254,37 +989,15 @@ final class LevelService: ObservableObject {
             }
             #endif
             
-            // Validate level before returning (Slice 5)
-            let validatedLevel = Level(
+            // Return normalized level
+            return Level(
                 id: level.id,
                 realm: level.realm,
                 baseLetters: normalizedBaseLetters,
-                solutions: finalSolutions,  // Use filtered solutions (4-6 letters only)
+                solutions: normalizedSolutions,
                 bonusWords: normalizedBonusWords,
                 metadata: level.metadata
             )
-            
-            // Validate level and log issues (Slice 5)
-            let validation = LevelSanity.validate(level: validatedLevel, dict: DictionaryService.shared.isLoaded ? DictionaryService.shared : nil)
-            if !validation.ok {
-                print("⚠️ Level \(level.id) validation warning: \(validation.reason)")
-                
-                // Log analytics in production too
-                AnalyticsManager.shared.logEvent("level_normalization_warning", parameters: [
-                    "level_id": level.id,
-                    "reason": validation.reason,
-                    "realm": level.realm ?? "unknown"
-                ])
-                
-                #if DEBUG
-                // In debug, be more aggressive about catching issues
-                if validation.reason.contains("6-letter isogram") {
-                    print("🔴 CRITICAL: Level \(level.id) missing required 6-letter isogram!")
-                }
-                #endif
-            }
-            
-            return validatedLevel
         }
     }
     
@@ -1456,75 +1169,6 @@ final class LevelService: ObservableObject {
     }
     
     // MARK: - Debug Helpers
-    
-    /// Validate all loaded levels and report issues (Slice 5 debug tool)
-    func validateAllLoadedLevels() async {
-        print("\n=== LEVEL VALIDATION REPORT ===")
-        print("Checking all cached levels for validation issues...\n")
-        
-        var totalLevels = 0
-        var validLevels = 0
-        var invalidLevels: [(Int, String)] = []
-        var missingIsograms: [Int] = []
-        
-        // Check bootstrap
-        let bootstrapValidation = LevelSanity.validate(level: Self.bootstrap, dict: DictionaryService.shared)
-        if bootstrapValidation.ok {
-            print("✅ Bootstrap level: VALID")
-            validLevels += 1
-        } else {
-            print("❌ Bootstrap level: \(bootstrapValidation.reason)")
-            invalidLevels.append((Self.bootstrap.id, bootstrapValidation.reason))
-            if bootstrapValidation.reason.contains("isogram") {
-                missingIsograms.append(Self.bootstrap.id)
-            }
-        }
-        totalLevels += 1
-        
-        // Check all cached levels
-        for (file, levels) in levelCache {
-            print("\nChecking file: \(file)")
-            for level in levels {
-                totalLevels += 1
-                let validation = LevelSanity.validate(level: level, dict: DictionaryService.shared)
-                
-                if validation.ok {
-                    validLevels += 1
-                } else {
-                    print("  ❌ Level \(level.id): \(validation.reason)")
-                    invalidLevels.append((level.id, validation.reason))
-                    
-                    if validation.reason.contains("isogram") {
-                        missingIsograms.append(level.id)
-                    }
-                }
-            }
-        }
-        
-        // Summary
-        print("\n=== VALIDATION SUMMARY ===")
-        print("Total levels checked: \(totalLevels)")
-        print("Valid levels: \(validLevels) (\(String(format: "%.1f", Double(validLevels) * 100.0 / Double(max(totalLevels, 1))))%)")
-        print("Invalid levels: \(invalidLevels.count)")
-        
-        if !missingIsograms.isEmpty {
-            print("\n🔴 CRITICAL: \(missingIsograms.count) levels missing 6-letter isograms:")
-            print("  Level IDs: \(missingIsograms.prefix(10).map(String.init).joined(separator: ", "))\(missingIsograms.count > 10 ? "..." : "")")
-        }
-        
-        if !invalidLevels.isEmpty {
-            print("\nMost common issues:")
-            let reasonCounts = Dictionary(grouping: invalidLevels, by: { $0.1 })
-                .mapValues { $0.count }
-                .sorted { $0.value > $1.value }
-            
-            for (reason, count) in reasonCounts.prefix(5) {
-                print("  - \(reason): \(count) levels")
-            }
-        }
-        
-        print("==========================\n")
-    }
     
     /// Print catalog debug information
     func printCatalogDebug() {

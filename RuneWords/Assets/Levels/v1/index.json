@@ -1,0 +1,27 @@
+{
+  "version": "1.0.0",
+  "source": "local",
+  "totalLevels": 50,
+  "chunks": [
+    {
+      "id": "chunk_000",
+      "file": "chunk_000.json",
+      "startId": 1,
+      "endId": 25,
+      "count": 25
+    },
+    {
+      "id": "chunk_001", 
+      "file": "chunk_001.json",
+      "startId": 26,
+      "endId": 50,
+      "count": 25
+    }
+  ],
+  "metadata": {
+    "generatedAt": "2025-01-01T00:00:00Z",
+    "minWordLength": 3,
+    "maxWordLength": 6,
+    "baseLetterCount": 6
+  }
+}

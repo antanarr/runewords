@@ -11,7 +11,6 @@ import UIKit
 import Combine
 
 @MainActor final class AdManager: NSObject, ObservableObject {
-    
     private var interstitial: InterstitialAd?
     private var isShowingInterstitial = false
     private var rewarded: RewardedAd?

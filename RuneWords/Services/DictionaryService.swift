@@ -6,14 +6,19 @@ import SwiftUI
 @MainActor
 final class DictionaryService: ObservableObject {
     
-    // MARK: - Shared normalization helper
+    static let shared = DictionaryService()
+    
+    // MARK: - Canonicalization (back-compat)
+    
+    /// Legacy name kept so existing call sites compile.
     static func normalizeWord(_ s: String) -> String {
-        s.trimmingCharacters(in: .whitespacesAndNewlines)
-            .applyingTransform(.toUnicodeName, reverse: true) ?? s // safe no-op
-            .uppercased()
+        return StringCanonicalizer.canon(s)
     }
     
-    static let shared = DictionaryService()
+    /// Instance convenience if needed elsewhere.
+    func normalize(_ s: String) -> String {
+        return StringCanonicalizer.canon(s)
+    }
     
     @MainActor @Published private(set) var isLoaded = false
     @MainActor @Published var loadingProgress: Double = 0.0
@@ -74,7 +79,7 @@ final class DictionaryService: ObservableObject {
             let localPrefixTree = PrefixTree()
             
             for (index, word) in words.enumerated() {
-                let upperWord = word.uppercased()
+                let upperWord = StringCanonicalizer.canon(word)
                 localValidWords.insert(upperWord)
                 
                 // Organize by length
@@ -135,7 +140,7 @@ final class DictionaryService: ObservableObject {
             for word in defaultWordList {
                 guard !word.isEmpty else { continue }
                 
-                let upperWord = word.uppercased()
+                let upperWord = StringCanonicalizer.canon(word)
                 localValidWords.insert(upperWord)
                 
                 let length = upperWord.count
@@ -179,7 +184,7 @@ final class DictionaryService: ObservableObject {
         let localPrefixTree = PrefixTree()
         
         for word in essentialWords {
-            let upperWord = word.uppercased()
+            let upperWord = StringCanonicalizer.canon(word)
             localValidWords.insert(upperWord)
             
             let length = upperWord.count
@@ -197,8 +202,14 @@ final class DictionaryService: ObservableObject {
     
     /// Check if a word is valid - thread-safe
     func isValidWord(_ word: String) -> Bool {
-        // Normalize incoming word (trim + uppercase)
-        let normalizedWord = DictionaryService.normalizeWord(word)
+        // Canonicalize incoming word
+        let normalizedWord = StringCanonicalizer.canon(word)
+        
+        #if DEBUG
+        print("📖 TELEMETRY | Dictionary Check:")
+        print("  - Input: '\(word)'")
+        print("  - Canon: '\(normalizedWord)'")
+        #endif
         
         // Check cache first
         if let cached = cache.get(normalizedWord) {
@@ -209,44 +220,26 @@ final class DictionaryService: ObservableObject {
         let isValid = validWords.contains(normalizedWord)
         cache.put(normalizedWord, isValid)
         
+        #if DEBUG
+        print("  - Valid: \(isValid)")
+        #endif
+        
         return isValid
     }
     
     /// Check if any valid word starts with this prefix - thread-safe
     func hasPrefix(_ prefix: String) -> Bool {
         guard !prefix.isEmpty else { return true }
-        // Normalize prefix to uppercase
-        let normalizedPrefix = DictionaryService.normalizeWord(prefix)
+        // Canonicalize prefix
+        let normalizedPrefix = StringCanonicalizer.canon(prefix)
         return prefixTree.hasPrefix(normalizedPrefix)
-    }
-    
-    /// Check if a word is an isogram (no repeated letters)
-    func isIsogram(_ word: String) -> Bool {
-        let chars = Array(word.uppercased())
-        return Set(chars).count == chars.count
-    }
-    
-    /// Find all 6-letter isograms that can be made from base letters
-    func find6LetterIsograms(from baseLetters: String) async -> [String] {
-        guard baseLetters.count == 6 else { return [] }
-        
-        // If base itself isn't an isogram, no 6-letter isograms are possible
-        if !isIsogram(baseLetters) {
-            return []
-        }
-        
-        // Find all 6-letter words from base
-        let words = await findWords(from: baseLetters, minLength: 6, maxLength: 6)
-        
-        // Filter to only isograms
-        return words.filter { isIsogram($0) }
     }
     
     /// Get all valid words that can be made from these letters - ASYNC
     func findWords(from letters: String, minLength: Int = 3, maxLength: Int = 7) async -> [String] {
         // Capture immutable snapshot on the main actor
         let snapshotWordsByLength = self.wordsByLength
-        let upper = letters.uppercased()
+        let upper = StringCanonicalizer.canon(letters)
         return await Task.detached(priority: .userInitiated) { () -> [String] in
             let letterCounts = DictionaryService.countLettersStatic(upper)
             var results: [String] = []

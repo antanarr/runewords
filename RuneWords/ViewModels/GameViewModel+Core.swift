@@ -4,6 +4,11 @@ import CoreGraphics
 import UIKit
 import FirebaseRemoteConfig
 import SwiftUI
+import OSLog
+
+extension Logger {
+    static let game = Logger(subsystem: "com.runewords", category: "game")
+}
 
 // MARK: - GameViewModel Core
 /// Refactored GameViewModel with feature-scoped extensions
@@ -27,6 +32,18 @@ class GameViewModel: ObservableObject {
     @Published var playerCoins: Int = 0
     @Published var isFirstLaunch: Bool = true
     
+    // Bootstrap gate to prevent re-entrancy
+    private var didResume: Bool = false
+    private var catalogReady: Bool = false
+    private var progressReady: Bool = false
+    
+    // PREVENT LEVEL BOUNCE-BACK: Session floor tracking
+    private var didBootstrap = false
+    private var sessionStartLevelID: Int?
+    
+    // Track if a guess is currently being processed (atomic guard)
+    @Published var isGuessInFlight: Bool = false
+    
     // MARK: - Game State
     @Published var grid: [[GridLetter]] = []
     @Published var letterWheel: [WheelLetter] = []
@@ -48,6 +65,9 @@ class GameViewModel: ObservableObject {
     @Published var lastFoundWord: String?
     @Published var showLevelCompleteCelebration: Bool = false
     @Published var animateCoinGain: Bool = false
+    @Published var lastSubmittedWord: String? = nil
+    @Published var bonusCount: Int = 0
+    @Published var showBonusSheet = false
     
     // MARK: - Visual Effects Properties (from VisualEffects extension)
     @Published var hintedTileIDs: Set<UUID> = []
@@ -145,7 +165,15 @@ class GameViewModel: ObservableObject {
     
     // MARK: - Setup Methods
     private func setupSubscribers() {
-        // Player data updates
+        // Subscribe to PlayerService progress updates for reconciliation
+        playerService.progressPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] serverProgress in
+                self?.applyServerProgress(serverProgress)
+            }
+            .store(in: &cancellables)
+        
+        // Player data updates (only for coin updates, not navigation)
         playerService.$player
             .compactMap { $0 }
             .removeDuplicates { old, new in
@@ -156,10 +184,7 @@ class GameViewModel: ObservableObject {
             .sink { [weak self] player in
                 guard let self = self else { return }
                 
-                Task {
-                    await self.levelService.fetchLevel(id: player.currentLevelID)
-                }
-                
+                // Do NOT fetch level here - let applyServerProgress handle it
                 self.bonusWordsFound = player.foundBonusWords
                 self.playerCoins = player.coins
             }
@@ -246,8 +271,21 @@ class GameViewModel: ObservableObject {
     // MARK: - Prepare for Play (P0 Fix)
     @MainActor
     func prepareForPlay() async {
+        // PREVENT DOUBLE BOOTSTRAP
+        guard !didBootstrap else {
+            print("🎮 prepareForPlay: Already bootstrapped, ignoring")
+            return
+        }
+        
+        // Single-shot bootstrap gate
+        guard !didResume else {
+            print("🎮 prepareForPlay: Already resumed, ignoring")
+            return
+        }
+        
         print("🎮 prepareForPlay: Starting...")
         print("🎮 Auth status: \(AuthService.shared.isAuthenticated)")
+        print("🎮 Resume target: pending")
         
         // ALWAYS ensure authentication is complete before loading levels
         // This is CRITICAL for remote catalog loading
@@ -258,15 +296,8 @@ class GameViewModel: ObservableObject {
         // Load catalog with remote preference now that auth is ready
         print("📚 Loading catalog with remote preference...")
         await levelService.loadCatalogIfNeeded(preferRemote: true)
+        catalogReady = true
         print("📚 Catalog loaded - Source: \(levelService.currentCatalogSource.rawValue), Count: \(levelService.totalLevelCount)")
-        
-        // Wait for catalog to be fully ready (Slice 4)
-        let catalogReady = await levelService.catalogState.waitUntilReady(timeout: 1.5)
-        if catalogReady {
-            print("✅ Catalog ready for gameplay")
-        } else {
-            print("⚠️ Catalog readiness timeout - using bootstrap")
-        }
         
         // Get current level ID from player or use last completed + 1
         var levelID = playerService.player?.currentLevelID ?? LevelService.bootstrap.id
@@ -302,27 +333,38 @@ class GameViewModel: ObservableObject {
             }
         }
         
-        // Fetch the level (will use bootstrap if catalog fails)
-        await levelService.fetchLevel(id: levelID)
+        // Mark progress as ready
+        progressReady = true
         
-        // Setup the level (bootstrap guaranteed to exist)
-        let level = levelService.currentLevel ?? LevelService.bootstrap
-        setupLevel(level: level)
-        
-        // Log catalog info
-        print("📦 Final state:")
-        print("📦 Catalog source: \(levelService.currentCatalogSource.rawValue)")
-        print("📦 Catalog version: \(levelService.catalogVersion)")
-        print("📦 Current level: \(level.id) - \(level.baseLetters)")
-        
-        // If still on bootstrap, try one more time
-        if level.id == LevelService.bootstrap.id && levelService.currentCatalogSource == .remote {
-            print("⚠️ Still on bootstrap despite remote catalog - fetching actual level")
-            if let firstId = levelService.orderedLevelIDs.first(where: { $0 != LevelService.bootstrap.id }) {
-                await levelService.fetchLevel(id: firstId)
-                if let newLevel = levelService.currentLevel {
-                    setupLevel(level: newLevel)
-                    print("✅ Loaded actual level: \(newLevel.id)")
+        // Final bootstrap check
+        if catalogReady && progressReady && !didResume {
+            didResume = true
+            didBootstrap = true
+            sessionStartLevelID = levelID  // Lock in session floor
+            Logger.game.info("BOOTSTRAP_START id=\(levelID)")
+            
+            // Fetch the level (will use bootstrap if catalog fails)
+            await levelService.fetchLevel(id: levelID)
+            
+            // Setup the level (bootstrap guaranteed to exist)
+            let level = levelService.currentLevel ?? LevelService.bootstrap
+            setupLevel(level: level)
+            
+            // Log catalog info
+            print("📦 Final state:")
+            print("📦 Catalog source: \(levelService.currentCatalogSource.rawValue)")
+            print("📦 Catalog version: \(levelService.catalogVersion)")
+            print("📦 Current level: \(level.id) - \(level.baseLetters)")
+            
+            // If still on bootstrap, try one more time
+            if level.id == LevelService.bootstrap.id && levelService.currentCatalogSource == .remote {
+                print("⚠️ Still on bootstrap despite remote catalog - fetching actual level")
+                if let firstId = levelService.orderedLevelIDs.first(where: { $0 != LevelService.bootstrap.id }) {
+                    await levelService.fetchLevel(id: firstId)
+                    if let newLevel = levelService.currentLevel {
+                        setupLevel(level: newLevel)
+                        print("✅ Loaded actual level: \(newLevel.id)")
+                    }
                 }
             }
         }
@@ -332,12 +374,6 @@ class GameViewModel: ObservableObject {
     func loadLevel(levelID: Int) {
         print("🎮 Loading specific level: \(levelID)")
         Task {
-            // Wait for catalog to be ready (Slice 4)
-            let ready = await levelService.catalogState.waitUntilReady()
-            if !ready {
-                print("⚠️ Catalog not ready after timeout, proceeding anyway")
-            }
-            
             if var player = playerService.player {
                 player.currentLevelID = levelID
                 playerService.player = player
@@ -356,10 +392,83 @@ class GameViewModel: ObservableObject {
     func toggleMusic() { audioManager.toggleMusic() }
     func toggleSfx() { audioManager.toggleSfx() }
     
+    // MARK: - Server Progress Reconciliation
+    func applyServerProgress(_ server: PlayerData) {
+        // 1) Clamp: never go below session start floor
+        if let floor = sessionStartLevelID, server.currentLevelID < floor {
+            Logger.game.info("IGNORED_DOWNLEVEL_UPDATE lastLevel=\(server.currentLevelID) < floor=\(floor)")
+            return
+        }
+        
+        // 2) Union found words/bonus words; never remove local optimistic results
+        let serverLevelKey = StringCanonicalizer.levelKey(currentLevel?.id ?? 0)
+        if let serverWords = server.levelProgress[serverLevelKey] {
+            let canonServerWords = Set(serverWords.map { StringCanonicalizer.canon($0) })
+            self.foundWords.formUnion(canonServerWords)
+        }
+        
+        let canonBonusWords = Set(server.foundBonusWords.map { StringCanonicalizer.canon($0) })
+        self.bonusWordsFound.formUnion(canonBonusWords)
+        
+        // 3) If server has advanced beyond current, then and only then move forward
+        if let current = currentLevel?.id, server.currentLevelID > current {
+            print("🚀 Server advanced to level \(server.currentLevelID) from \(current)")
+            Task { 
+                await levelService.fetchLevel(id: server.currentLevelID)
+                if let newLevel = levelService.currentLevel {
+                    setupLevel(level: newLevel)
+                }
+            }
+        }
+    }
+    
     // MARK: - Pill Animation Triggers
     /// Publishes when a word should animate from pill to slot
     @Published var animatingWordToSlot: String? = nil
     @Published var animatingWordToBonus: String? = nil
+    
+    /* RW PATCH START: completion timing & resets */
+    
+    @MainActor
+    func resetEphemeralState() {
+        currentGuess = ""
+        currentGuessIndices = []
+        lastSubmittedWord = nil
+        bonusWordsFound.removeAll()
+        bonusCount = 0
+        showBonusSheet = false
+    }
+    
+    @MainActor
+    func handleAcceptedSolution(_ word: String) {
+        // Update UI (grid) first so the word appears before completion.
+        revealWordInGrid(word)
+        
+        // Allow the grid animation to play before showing completion UI.
+        Task { @MainActor in
+            // ~0.7s for reveal animation; tweak if your animation is longer/shorter.
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            
+            // Check if all solutions found after this word
+            guard let level = currentLevel else { return }
+            let allSolutionsFound = Set(level.solutions.keys).isSubset(of: foundWords)
+            
+            if allSolutionsFound {
+                // Small grace so the player "sees" the final fill.
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                isLevelComplete = true
+            }
+        }
+    }
+    
+    @MainActor
+    func advanceToNextLevelWithReset() {
+        isLevelComplete = false
+        resetEphemeralState()
+        // Call the existing advanceToNextLevel from LevelManagement
+        advanceToNextLevel()
+    }
+    /* RW PATCH END */
     
     /// Trigger pill-to-slot animation
     func triggerPillToSlotAnimation(word: String) {

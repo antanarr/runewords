@@ -4,7 +4,7 @@ import SwiftUI
 import FirebaseCore
 import GoogleMobileAds
 import Combine
-#if targetEnvironment(simulator)
+#if canImport(FirebaseAppCheck)
 import FirebaseAppCheck
 #endif
 
@@ -13,8 +13,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
   func application(_ application: UIApplication,
                    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
     // Configure App Check for simulator and debug builds - MUST be before configure()
-    #if DEBUG || targetEnvironment(simulator)
-    print("🔐 Setting up App Check Debug Provider...")
+    #if DEBUG && canImport(FirebaseAppCheck)
+    print("🔐 Setting up App Check Debug Provider…")
     let providerFactory = AppCheckDebugProviderFactory()
     AppCheck.setAppCheckProviderFactory(providerFactory)
     print("✅ App Check Debug Provider configured")
@@ -53,6 +53,7 @@ struct RuneWordsApp: App {
   @StateObject private var appState = AppState.shared
   @StateObject private var auth = AuthService.shared
   @StateObject private var progress = ProgressService.shared
+  @StateObject private var audio = AudioManager.shared
 
   var body: some Scene {
     WindowGroup {
@@ -61,6 +62,7 @@ struct RuneWordsApp: App {
         .environmentObject(appState)
         .environmentObject(auth)
         .environmentObject(progress)
+        .environmentObject(audio)
         .preferredColorScheme(.dark) // Force dark mode for consistent UI
         .task {
           // Ensure user is signed in anonymously

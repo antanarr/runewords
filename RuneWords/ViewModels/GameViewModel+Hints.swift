@@ -51,35 +51,38 @@ extension GameViewModel {
             }
         }
         
-        // Reveal a random letter
+        // LOCAL-FIRST: Reveal a random letter immediately
         guard revealRandomLetterInSolution() else {
             triggerShakeAnimation()
             appState.showOverlay(.hint("No more hints available"))
             return
         }
         
-        // Deduct cost and save
+        // LOCAL-FIRST: Update local state immediately
         player.coins -= hintCost
         player.totalHintsUsed += 1
         hintsUsedCount += 1  // Track for current level
-        playerService.player = player
-        playerService.saveProgress(player: player.toPlayerData())
+        playerService.player = player  // Update local state first
         playerCoins = player.coins
+        
+        // Feedback immediately
+        audioManager.playSound(effect: .success)
+        HapticManager.shared.play(.success)
+        resetDifficultyTracking()
         
         // WO-006: Log hint usage
         AnalyticsManager.shared.logHintUsed(type: "clarity", cost: hintCost)
         
-        // Track hint usage in Firestore
-        Task {
+        // RESILIENT: Save to Firestore asynchronously without blocking UI
+        Task { @MainActor in
+            // Try to save progress, but don't fail the hint action if it fails
+            playerService.saveProgress(player: player.toPlayerData())
+            
+            // Also track hint usage asynchronously
             if let uid = AuthService.shared.uid {
                 await ProgressService.shared.incrementHintsUsed(uid: uid)
             }
         }
-        
-        // Feedback
-        audioManager.playSound(effect: .success)
-        HapticManager.shared.play(.success)
-        resetDifficultyTracking()
     }
     
     // MARK: - Precision (Targeted Hint)
@@ -112,26 +115,31 @@ extension GameViewModel {
             return
         }
         
-        // Reveal the letter
+        // LOCAL-FIRST: Reveal the letter immediately
         revealedLettersInSolutions[shortestWord, default: []].insert(firstUnrevealedIndex)
         
-        // Update player and provide feedback
+        // LOCAL-FIRST: Update player state immediately
         player.coins -= precisionCost
         player.totalHintsUsed += 1
         hintsUsedCount += 1  // Track for current level
-        playerService.player = player
-        playerService.saveProgress(player: player.toPlayerData())
+        playerService.player = player  // Update local state first
         playerCoins = player.coins
         
-        // WO-006: Log hint usage
-        AnalyticsManager.shared.logHintUsed(type: "precision", cost: precisionCost)
-        
+        // Feedback immediately
         audioManager.playSound(effect: .success)
         HapticManager.shared.play(.success)
         resetDifficultyTracking()
         
         // Show which word was targeted
         appState.showOverlay(.hint("Revealed letter in \(shortestWord.count)-letter word"))
+        
+        // WO-006: Log hint usage
+        AnalyticsManager.shared.logHintUsed(type: "precision", cost: precisionCost)
+        
+        // RESILIENT: Save to Firestore asynchronously
+        Task { @MainActor in
+            playerService.saveProgress(player: player.toPlayerData())
+        }
     }
     
     // MARK: - Momentum (Multiple Hints)
@@ -146,7 +154,7 @@ extension GameViewModel {
             return
         }
         
-        // Reveal multiple letters
+        // LOCAL-FIRST: Reveal multiple letters immediately
         var revealedCount = 0
         for _ in 0..<reveals {
             if revealRandomLetterInSolution() {
@@ -156,20 +164,25 @@ extension GameViewModel {
         
         // Only charge if something was revealed
         if revealedCount > 0 {
+            // LOCAL-FIRST: Update state immediately
             player.coins -= momentumCost
             player.totalHintsUsed += 1
             hintsUsedCount += 1  // Track for current level
-            playerService.player = player
-            playerService.saveProgress(player: player.toPlayerData())
+            playerService.player = player  // Update local state first
             playerCoins = player.coins
+            
+            // Feedback immediately
+            audioManager.playSound(effect: .success)
+            HapticManager.shared.play(.success)
+            appState.showOverlay(.hint("Revealed \(revealedCount) letters"))
             
             // WO-006: Log hint usage
             AnalyticsManager.shared.logHintUsed(type: "momentum", cost: momentumCost)
             
-            audioManager.playSound(effect: .success)
-            HapticManager.shared.play(.success)
-            
-            appState.showOverlay(.hint("Revealed \(revealedCount) letters"))
+            // RESILIENT: Save to Firestore asynchronously
+            Task { @MainActor in
+                playerService.saveProgress(player: player.toPlayerData())
+            }
         } else {
             triggerShakeAnimation()
             appState.showOverlay(.hint("No more hints available"))
@@ -203,7 +216,7 @@ extension GameViewModel {
             return
         }
         
-        // Reveal the word
+        // LOCAL-FIRST: Update all state immediately
         player.coins -= revelationCost
         player.totalHintsUsed += 1
         hintsUsedCount += 1  // Track for current level
@@ -217,23 +230,29 @@ extension GameViewModel {
             player.levelProgress[String(levelID)] = [wordToReveal]
         }
         
-        // WO-006: Log hint usage
-        AnalyticsManager.shared.logHintUsed(type: "revelation", cost: revelationCost)
+        // Update local state immediately
+        playerService.player = player
+        playerCoins = player.coins
+        
+        // Show which word was revealed immediately
+        appState.showOverlay(.hint("Revealed: \(wordToReveal)"))
         
         // Animate the reveal
         Task {
             await revealWordInGridWithAnimation(wordToReveal, isRevelation: true)
         }
         
-        // Save and check completion
-        playerService.player = player
-        playerService.saveProgress(player: player.toPlayerData())
-        playerCoins = player.coins
+        // Check completion
         checkForLevelCompletion()
         resetDifficultyTracking()
         
-        // Show which word was revealed
-        appState.showOverlay(.hint("Revealed: \(wordToReveal)"))
+        // WO-006: Log hint usage
+        AnalyticsManager.shared.logHintUsed(type: "revelation", cost: revelationCost)
+        
+        // RESILIENT: Save to Firestore asynchronously
+        Task { @MainActor in
+            playerService.saveProgress(player: player.toPlayerData())
+        }
     }
     
     // MARK: - Helper Methods
